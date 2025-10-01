@@ -6,16 +6,16 @@ First, we simulated finding a 'winner' value in a list using a brute force algor
 
 ## Classical Search
 
-We define the following:
-- A list of numbers `my_list`.
-- An oracle function `the_oracle()` that returns `True` if the input equals the "winner".
+We defined the following:
+- List of numbers `my_list`
+- Oracle function `the_oracle()` that returns `True` if the input equals the "winner"
 
-The brute force search goes through the list until it finds the winner.
-On average, this requires N/2 calls for a list of size N.
+The brute force search goes through the list until it finds the wanted value, the winner.
+This requires N/2 calls for a list of size N
 
  ## Quantum Search (Grover’s Algorithm)
 
- Grover’s algorithm can find the marked element in about √N calls
+ Grover’s algorithm can find the target element in about √N calls
 
  Steps:
  1. Superposition
