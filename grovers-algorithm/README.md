@@ -21,4 +21,8 @@ This requires N/2 calls for a list of size N
  1. Superposition
  2. Oracle
  3. Reflection
- 4. Measurement
+    a. H gate
+    b. Z gate
+    c. oracle, in our case cz gate
+    d. H gate again and repeat
+ 5. Measurement
