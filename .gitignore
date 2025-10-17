@@ -1,2 +1,3 @@
 .venv
 servers/qubo/*
+__pycache__
