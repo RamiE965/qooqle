@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>QUBO Join Optimizer</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f4; }
+        h1, h2, h3 { color: #333; }
+        .container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        .form-section { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9; }
+        .form-section h3 { margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #555;}
+        input[type="text"], input[type="number"], select, textarea { 
+            width: calc(100% - 20px); /* Account for padding */ 
+            padding: 8px 10px; 
+            margin-bottom: 10px; 
+            border: 1px solid #ccc; 
+            border-radius: 4px;
+            box-sizing: border-box; /* Include padding in width */
+        }
+        textarea { height: 70px; resize: vertical; }
+        button[type="submit"] { background-color: #5cb85c; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }
+        button[type="submit"]:hover { background-color: #4cae4c; }
+        .error { color: #d9534f; background-color: #f2dede; border: 1px solid #ebccd1; padding: 10px; border-radius: 4px; margin-bottom: 15px; }
+        .warning { color: #8a6d3b; background-color: #fcf8e3; border: 1px solid #faebcc; padding: 10px; border-radius: 4px; margin-bottom: 15px; }
+        .result { margin-top: 20px; padding: 15px; background-color: #dff0d8; border: 1px solid #d6e9c6; border-radius: 5px; color: #3c763d;}
+        .result h2 { margin-top: 0; color: #3c763d; }
+        .result pre { background-color: #f1f1f1; color: #333; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9em; white-space: pre-wrap; word-wrap: break-word; }
+        .cost-list { max-height: 200px; overflow-y: auto; } 
+        small { color: #777; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>QUBO Join Order Optimizer</h1>
+
+        <!-- Display Flash Messages (Errors/Warnings) -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="{{ category }}">{{ message }}</div>
+                {% endfor %}
+                <hr>
+            {% endif %}
+        {% endwith %}
+
+        <form action="/optimize" method="POST">
+            
+            <!-- Table Definitions (Simplified for PoC - max 4 tables) -->
+            <div class="form-section">
+                <h3>Define Tables (Max 4)</h3>
+                {% for i in range(1, 5) %}
+                <div style="border-bottom: 1px dashed #eee; margin-bottom:10px; padding-bottom:10px;">
+                    <label for="table_name_{{i}}">Table {{i}} Name:</label>
+                    <input type="text" id="table_name_{{i}}" name="table_name_{{i}}" value="{{ form_data.get('table_name_' + i|string, '') }}">
+                    
+                    <label for="rows_{{i}}">Table {{i}} Row Count:</label>
+                    <input type="number" id="rows_{{i}}" name="rows_{{i}}" value="{{ form_data.get('rows_' + i|string, '') }}" placeholder="e.g., 150000">
+                    <!-- Add inputs for distinct counts of join keys in a real version -->
+                </div>
+                {% endfor %}
+            </div>
+
+            <!-- Join Definitions -->
+            <div class="form-section">
+                <h3>Define Join Relationships</h3>
+                <label for="join_pairs">Join Pairs (one per line):</label>
+                <textarea id="join_pairs" name="join_pairs" placeholder="Example:&#10;customer.c_custkey = orders.o_custkey&#10;orders.o_orderkey = lineitem.l_orderkey">{{ form_data.get('join_pairs', '') }}</textarea>
+                <small>Format: table1.key1 = table2.key2</small>
+            </div>
+
+            <button type="submit">Optimize Join Order</button>
+        </form>
+
+        <!-- Results Section -->
+        {% if join_tree or error or cost_data %} {# Check cost_data here too #}
+        <hr>
+        <div class="result">
+            <h2>Optimization Results</h2>
+            {% if solver_used %}
+                <p><strong>Solver Used:</strong> {{ solver_used }}</p> 
+            {% endif %}
+            {% if elapsed_time %}
+                <p><strong>Optimization Time:</strong> {{ elapsed_time }} seconds</p>
+            {% endif %}
+
+            {% if error and not join_tree %} {# Only show error if no join tree was produced #}
+                <p class="error"><strong>Error:</strong> {{ error }}</p>
+            {% elif join_tree %}
+                <p><strong>Optimal Join Order Tree:</strong></p>
+                <pre><code>{{ join_tree }}</code></pre>
+            {% elif not error and not join_tree %}
+                 <p>Optimization finished, but no optimal tree was found or returned.</p>
+            {% endif %}
+
+            <!-- Display Calculated Costs -->
+            {% if cost_data %}
+                <hr>
+                <p><strong>Calculated Cardinality Costs (Weights):</strong></p>
+                <div class="cost-list"> 
+                    <pre><code>{% for combination, cost in cost_data -%}
+{{ combination | map('string') | join(', ') }}: {{ cost | int if cost != 1e12 else 'Infinite (Unjoinable)' }}
+{%- endfor %}</code></pre> 
+                </div>
+                <small>Note: Costs based on simplified model.</small>
+            {% endif %}
+
+        </div> <!-- End of result div -->
+        {% endif %} <!-- End of result block -->
+    </div> <!-- End of container div -->
+</body>
+</html>
