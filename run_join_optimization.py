@@ -12,7 +12,7 @@ from scipy.sparse import SparseEfficiencyWarning
 # Suppress scipy sparse matrix efficiency warnings
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
 
-from SSS_QUBO import QUBO_formulation, QUBO_Split_Optimization_func, Helping_functions
+from SSS_QUBO import QUBO_formulation, QUBO_Split_Optimization_func, Helping_functions, SolverType
 
 def setup_database(db_type, connection, scale_factor=0.1):
     """
@@ -220,7 +220,7 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
     
     try:
         optimizer = QUBO_Split_Optimization_func(f"join_log_{num_tables}")
-        qubo_tree, selected_joins, error_msg = optimizer.finding_opt_jo(relations, weights, 'qaoa')
+        qubo_tree, selected_joins, error_msg = optimizer.finding_opt_jo(relations, weights, SolverType.QAOA)
     except Exception as e:
         print(f"QUBO optimization failed: {e}")
         qubo_tree = None

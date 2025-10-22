@@ -9,6 +9,7 @@ import pandas as pd
 import csv
 import warnings
 from scipy.sparse import SparseEfficiencyWarning
+from enum import Enum, auto
 
 # Suppress scipy sparse matrix efficiency warnings
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
@@ -22,11 +23,11 @@ try:
     from qiskit.primitives import StatevectorSampler  # Use what's actually available
     
     QISKIT_AVAILABLE = True
-    print("✓ Qiskit packages available - QAOA solver enabled")
+    print("Qiskit packages available - QAOA solver enabled")
     
 except ImportError as e:
     QISKIT_AVAILABLE = False
-    print(f"❌ Qiskit import failed: {e}")
+    print(f"Qiskit import failed: {e}")
 
 # Classical Optimization / Modeling (for compatibility)
 try:
@@ -38,6 +39,11 @@ except ImportError:
     CLASSICAL_OPT_AVAILABLE = False
     print("Warning: Classical optimization packages (dimod, neal) not available.")
 
+
+class SolverType(Enum):
+    QAOA = auto()
+    SIMULATED_ANNEALING = auto()
+    EXACT_RESULT = auto()
 
 class QUBO_formulation:
     """
@@ -148,10 +154,6 @@ class QUBO_formulation:
 
     
 class Solvers_qiskit:
-    """
-    QUBO solving via Qiskit (NumPyMinimumEigensolver or QAOA) and classical SA (neal).
-    Returns dimod.SampleSet for compatibility with existing code paths.
-    """
 
     @staticmethod
     def _penalty(weights_lst):
@@ -159,46 +161,32 @@ class Solvers_qiskit:
 
     @staticmethod
     def prepare_model(s_1_helper, s_2_helper, n, weights_lst):
-        """
-        Build both Qiskit QuadraticProgram and dimod BinaryQuadraticModel.
-        """
         P = Solvers_qiskit._penalty(weights_lst)
 
-        # Qiskit QuadraticProgram
-        if QISKIT_AVAILABLE:
-            qp = QuadraticProgram()
-            for i in range(n):
-                qp.binary_var(f"x_{i}")
+        qp = QuadraticProgram()
+        for i in range(n):
+            qp.binary_var(f"x_{i}")
 
-            linear = {f"x_{i}": (weights_lst[i] - P) for i in range(len(s_1_helper))}
-            quadratic = {}
-            for i, j in s_2_helper:
-                key = (f"x_{i}", f"x_{j}")
-                quadratic[key] = quadratic.get(key, 0.0) + P
+        linear = {f"x_{i}": (weights_lst[i] - P) for i in range(len(s_1_helper))}
+        quadratic = {}
+        for i, j in s_2_helper:
+            key = (f"x_{i}", f"x_{j}")
+            quadratic[key] = quadratic.get(key, 0.0) + P
 
-            qp.minimize(linear=linear, quadratic=quadratic)
-        else:
-            qp = None
+        qp.minimize(linear=linear, quadratic=quadratic)
 
-        # dimod BQM for compatibility
-        if CLASSICAL_OPT_AVAILABLE:
-            bqm = dimod.BinaryQuadraticModel({}, {}, 0.0, vartype=dimod.BINARY)
-            for i in range(n):
-                bqm.add_variable(i)
-            for i in range(len(s_1_helper)):
-                bqm.set_linear(i, (weights_lst[i] - P))
-            for i, j in s_2_helper:
-                bqm.set_quadratic(i, j, P)
-        else:
-            bqm = None
+        bqm = dimod.BinaryQuadraticModel({}, {}, 0.0, vartype=dimod.BINARY)
+        for i in range(n):
+            bqm.add_variable(i)
+        for i in range(len(s_1_helper)):
+            bqm.set_linear(i, (weights_lst[i] - P))
+        for i, j in s_2_helper:
+            bqm.set_quadratic(i, j, P)
 
         return qp, bqm
 
     @staticmethod
     def _qp_solution_to_sampleset(qp, bqm, sol_x):
-        """
-        Convert Qiskit solution vector -> dimod.SampleSet.
-        """
         if str(type(sol_x)).find('SampleView') != -1:
             sample_dict = dict(sol_x)
             return dimod.SampleSet.from_samples_bqm([sample_dict], bqm)
@@ -209,9 +197,6 @@ class Solvers_qiskit:
 
     @staticmethod
     def exact_result(qp_bqm_tuple):
-        """
-        NumPyMinimumEigensolver -> SampleSet.
-        """
         if not QISKIT_AVAILABLE:
             raise ValueError("Qiskit packages not available. Cannot use exact_result solver.")
         qp, bqm = qp_bqm_tuple
@@ -220,14 +205,10 @@ class Solvers_qiskit:
 
     @staticmethod
     def qaoa(qp_bqm_tuple, reps=3, seed=42):
-        """
-        QAOA -> SampleSet.
-        """
         if not QISKIT_AVAILABLE:
             raise ValueError("Qiskit packages not available. Cannot use qaoa solver.")
         qp, bqm = qp_bqm_tuple
         
-        # Use StatevectorSampler which is available in your environment
         sampler = StatevectorSampler()
         qaoa_mes = QAOA(sampler=sampler, optimizer=COBYLA(), reps=reps)
         res = MinimumEigenOptimizer(qaoa_mes).solve(qp)
@@ -235,9 +216,6 @@ class Solvers_qiskit:
 
     @staticmethod
     def simulated_annealing(qp_bqm_tuple):
-        """
-        Classical neal SA on BQM -> SampleSet.
-        """
         if not CLASSICAL_OPT_AVAILABLE:
             raise ValueError("Classical optimization packages not available. Cannot use simulated_annealing solver.")
         _qp, bqm = qp_bqm_tuple
@@ -457,35 +435,43 @@ class Experiments_class:
                 "- StatevectorSampler is accessible\n\n"
                 "Try: pip install qiskit-optimization"
             )
-
+    
     @staticmethod
-    def _select_solver(solver_name, qp_bqm_tuple):
+    def _select_solver(solver: SolverType, qp_bqm_tuple):
         """Select and run the appropriate Qiskit solver."""
         Experiments_class._check_qiskit_available()
         
-        if solver_name == 'exact_result':
+        # Compare against Enum members
+        if solver == SolverType.EXACT_RESULT:
+            if not QISKIT_AVAILABLE:
+                raise ValueError("Qiskit packages not available. Cannot use EXACT_RESULT solver.")
             return Solvers_qiskit.exact_result(qp_bqm_tuple)
-        elif solver_name in ('qaoa', 'qiskit_qaoa'):
+            
+        elif solver == SolverType.QAOA:
+            if not QISKIT_AVAILABLE:
+                raise ValueError("Qiskit packages not available. Cannot use QAOA solver.")
             return Solvers_qiskit.qaoa(qp_bqm_tuple)
-        elif solver_name == 'simulated_annealing':
+            
+        elif solver == SolverType.SIMULATED_ANNEALING:
             if not CLASSICAL_OPT_AVAILABLE:
-                raise ValueError("Classical optimization packages not available. Cannot use 'simulated_annealing' solver.")
+                raise ValueError("Classical optimization packages not available. Cannot use SIMULATED_ANNEALING solver.")
             return Solvers_qiskit.simulated_annealing(qp_bqm_tuple)
+            
         else:
-            raise ValueError(f"Unknown solver '{solver_name}'. Available: 'exact_result', 'qaoa', 'simulated_annealing'")
+            raise ValueError(f"Unknown solver '{solver}'.")
 
     @staticmethod
     def get_available_solvers():
-        """Return list of available solvers."""
+        """Return list of available solver Enum members."""
         available = []
         if QISKIT_AVAILABLE:
-            available.extend(['exact_result', 'qaoa'])
+            available.extend([SolverType.EXACT_RESULT, SolverType.QAOA])
         if CLASSICAL_OPT_AVAILABLE:
-            available.append('simulated_annealing')
+            available.append(SolverType.SIMULATED_ANNEALING)
         return available
 
     @staticmethod
-    def qiskit_experiment(relations, weights, solver):
+    def qiskit_experiment(relations, weights, solver: SolverType):
         """
         Build QUBO (S1,S2), solve with Qiskit backend, decode.
         """
@@ -734,7 +720,7 @@ class QUBO_Split_Optimization_func:
 
 
     @staticmethod
-    def findind_LR_deep_jo(vars_J2R, All_vars, weights, solver):
+    def finding_LR_deep_jo(vars_J2R, All_vars, weights, solver: SolverType):
         """
         Left/right-deep join-tree search over all 2-way seeds (vars_J2R).
         Returns (best_detail, exp_run).
@@ -819,7 +805,7 @@ class QUBO_Split_Optimization_func:
 
 
 
-    def finding_opt_jo(self, relations, weights, solver):
+    def finding_opt_jo(self, relations, weights, solver: SolverType):
         """
         Find optimal join order for n in {4,5,6,7,8} using split strategies + Qiskit solvers.
         Uses Qiskit QAOA, NumPyMinimumEigensolver, and classical simulated annealing.
@@ -837,7 +823,7 @@ class QUBO_Split_Optimization_func:
         # ----- n = 3 -----
         if n == 3:
             count = 1
-            optimal_jo, exp_run = QUBO_Split_Optimization_func.findind_LR_deep_jo(vars_2, power_set, weights, solver)
+            optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
             if optimal_jo[0] == dp_optimal_cost:
                 print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
                 optimal_jo_details.append(optimal_jo)
@@ -849,7 +835,7 @@ class QUBO_Split_Optimization_func:
         if n == 4:
             # Split -> 1 (deep trees)
             count = 1
-            optimal_jo, exp_run = QUBO_Split_Optimization_func.findind_LR_deep_jo(vars_2, power_set, weights, solver)
+            optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
             if optimal_jo[0] == dp_optimal_cost:
                 print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
                 optimal_jo_details.append(optimal_jo)
@@ -873,7 +859,7 @@ class QUBO_Split_Optimization_func:
         # ----- n = 5 -----
         if n == 5:
             count = 1
-            optimal_jo, exp_run = QUBO_Split_Optimization_func.findind_LR_deep_jo(vars_2, power_set, weights, solver)
+            optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
             if (optimal_jo[0] == dp_optimal_cost):
                 print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} & #exp:{exp_run}.')
                 optimal_jo_details.append(optimal_jo)
@@ -884,7 +870,7 @@ class QUBO_Split_Optimization_func:
         if n == 6:
             # Split -> 1 (deep)
             count = 1
-            optimal_jo, exp_run = QUBO_Split_Optimization_func.findind_LR_deep_jo(vars_2, power_set, weights, solver)
+            optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
             if optimal_jo[0] == dp_optimal_cost:
                 print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
                 optimal_jo_details.append(optimal_jo)
@@ -936,7 +922,7 @@ class QUBO_Split_Optimization_func:
         # ----- n = 7 -----
         if n == 7:
             count = 1
-            optimal_jo, exp_run = QUBO_Split_Optimization_func.findind_LR_deep_jo(vars_2, power_set, weights, solver)
+            optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
             if optimal_jo[0] == dp_optimal_cost:
                 print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
                 optimal_jo_details.append(optimal_jo)
@@ -1038,7 +1024,7 @@ class QUBO_Split_Optimization_func:
         # ----- n = 8 -----
         if n == 8:
             count = 1
-            optimal_jo, exp_run = QUBO_Split_Optimization_func.findind_LR_deep_jo(vars_2, power_set, weights, solver)
+            optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
             if optimal_jo[0] == dp_optimal_cost:
                 print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
                 optimal_jo_details.append(optimal_jo)
@@ -1137,7 +1123,7 @@ class QUBO_Split_Optimization_func:
             vars_5, cost_5 = Helping_functions.single_cost_var(power_set, weights, [5])
             vars_4t = store_final_vars_44[0] + store_final_vars_44[1]
             total_cost_4 = store_total_cost_44[0] + store_total_cost_44[1]
-            optimal_jo, exprun_s8 = QUBO_Split_Optimization_func.findind_LR_deep_jo(
+            optimal_jo, exprun_s8 = QUBO_Split_Optimization_func.finding_LR_deep_jo(
                 vars_4t, vars_4t + vars_5 + vars_6 + vars_78, total_cost_4 + cost_5 + cost_6 + cost_78, solver
             )
             if optimal_jo[0] == dp_optimal_cost:
@@ -1194,10 +1180,10 @@ if __name__ == "__main__":
     # 3) Check Qiskit availability for QAOA
     try:
         Experiments_class._check_qiskit_available()
-        solver_to_use = 'qaoa'
-        print(f"✓ Qiskit available. Using '{solver_to_use}' solver with StatevectorSampler.")
+        solver_to_use = SolverType.QAOA
+        print(f"Qiskit available. Using '{solver_to_use}' solver with StatevectorSampler.")
     except ImportError as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         exit(1)
 
     # 4) Optimizer instance
