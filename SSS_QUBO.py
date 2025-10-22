@@ -22,11 +22,11 @@ try:
     from qiskit.primitives import StatevectorSampler  # Use what's actually available
     
     QISKIT_AVAILABLE = True
-    print("✓ Qiskit packages available - QAOA solver enabled")
+    print("Qiskit packages available - QAOA solver enabled")
     
 except ImportError as e:
     QISKIT_AVAILABLE = False
-    print(f"❌ Qiskit import failed: {e}")
+    print(f"Qiskit import failed: {e}")
 
 # Classical Optimization / Modeling (for compatibility)
 try:
@@ -207,19 +207,20 @@ class Solvers_qiskit:
         sample = {i: bits[i] for i in range(len(bits))}
         return dimod.SampleSet.from_samples_bqm([sample], bqm)
 
-    @staticmethod
-    def exact_result(qp_bqm_tuple):
-        """
-        NumPyMinimumEigensolver -> SampleSet.
-        """
-        if not QISKIT_AVAILABLE:
-            raise ValueError("Qiskit packages not available. Cannot use exact_result solver.")
-        qp, bqm = qp_bqm_tuple
-        res = MinimumEigenOptimizer(NumPyMinimumEigensolver()).solve(qp)
-        return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res.x)
+    # @staticmethod
+    # def exact_result(qp_bqm_tuple):
+    #     print("HERE")
+    #     """
+    #     NumPyMinimumEigensolver -> SampleSet.
+    #     """
+    #     if not QISKIT_AVAILABLE:
+    #         raise ValueError("Qiskit packages not available. Cannot use exact_result solver.")
+    #     qp, bqm = qp_bqm_tuple
+    #     res = MinimumEigenOptimizer(NumPyMinimumEigensolver()).solve(qp)
+    #     return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res.x)
 
     @staticmethod
-    def qaoa(qp_bqm_tuple, reps=3, seed=42):
+    def qaoa(qp_bqm_tuple, reps=3, seed=30):
         """
         QAOA -> SampleSet.
         """
@@ -233,15 +234,15 @@ class Solvers_qiskit:
         res = MinimumEigenOptimizer(qaoa_mes).solve(qp)
         return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res.x)
 
-    @staticmethod
-    def simulated_annealing(qp_bqm_tuple):
-        """
-        Classical neal SA on BQM -> SampleSet.
-        """
-        if not CLASSICAL_OPT_AVAILABLE:
-            raise ValueError("Classical optimization packages not available. Cannot use simulated_annealing solver.")
-        _qp, bqm = qp_bqm_tuple
-        return SimulatedAnnealingSampler().sample(bqm, num_reads=100000)
+    # @staticmethod
+    # def simulated_annealing(qp_bqm_tuple):
+    #     """
+    #     Classical neal SA on BQM -> SampleSet.
+    #     """
+    #     if not CLASSICAL_OPT_AVAILABLE:
+    #         raise ValueError("Classical optimization packages not available. Cannot use simulated_annealing solver.")
+    #     _qp, bqm = qp_bqm_tuple
+    #     return SimulatedAnnealingSampler().sample(bqm, num_reads=100000)
 
 class Helping_functions:
     """
@@ -462,7 +463,7 @@ class Experiments_class:
     def _select_solver(solver_name, qp_bqm_tuple):
         """Select and run the appropriate Qiskit solver."""
         Experiments_class._check_qiskit_available()
-        
+        print(solver_name)
         if solver_name == 'exact_result':
             return Solvers_qiskit.exact_result(qp_bqm_tuple)
         elif solver_name in ('qaoa', 'qiskit_qaoa'):
@@ -1195,9 +1196,9 @@ if __name__ == "__main__":
     try:
         Experiments_class._check_qiskit_available()
         solver_to_use = 'qaoa'
-        print(f"✓ Qiskit available. Using '{solver_to_use}' solver with StatevectorSampler.")
+        print(f"Qiskit available. Using '{solver_to_use}' solver with StatevectorSampler.")
     except ImportError as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         exit(1)
 
     # 4) Optimizer instance
