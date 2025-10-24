@@ -25,7 +25,6 @@ app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
 def calculate_costs_from_stats_benchmark_logic(relations, table_stats, join_key_map):
-    print("Calculating costs using benchmark.py's simple cardinality/selectivity logic...")
     all_combinations = QUBO_formulation.relation_sublists(relations)
     weights = []
     costs_map = {}
@@ -36,9 +35,9 @@ def calculate_costs_from_stats_benchmark_logic(relations, table_stats, join_key_
 
     print("Table Sizes Used:")
     for rel, size in table_sizes.items():
-         print(f"  {rel}: {size}")
+         print(f"  {rel}: {size}\n")
 
-    print("\nCalculating Join Costs:")
+    print("Calculating Join Costs:")
     for subset in all_combinations:
         if len(subset) < 2:
             continue
@@ -101,7 +100,7 @@ def calculate_costs_from_stats_benchmark_logic(relations, table_stats, join_key_
         weights.append(final_cost)
         costs_map[subset_frozenset] = final_cost
 
-    print(f"\nCalculated {len(weights)} weights using simple cardinality/selectivity model.")
+    print(f"\nCalculated {len(weights)} weights using simple cardinality model.")
     return weights, costs_map
 
 
@@ -188,7 +187,6 @@ def optimize():
         all_combinations = QUBO_formulation.relation_sublists(relations) # Needed for get_cost_of_tree context if using indices
         if len(weights) != len(all_combinations):
              flash("Warning: Mismatch between calculated weights and combinations.", "warning")
-             # Handle error state? For now, proceed but cost calc might fail.
 
     except Exception as e:
         flash(f"Error calculating costs: {e}", "error"); print(f"Cost calculation error:\n{traceback.format_exc()}"); return render_template('index.html', form_data=form_data)
