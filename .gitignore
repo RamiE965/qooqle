@@ -1,2 +1,56 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage*
+htmlcov/
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node/Next.js (scoped to frontend)
+frontend-code/node_modules/
+frontend-code/.next/
+frontend-code/.vercel/
+frontend-code/.turbo/
+frontend-code/.cache/
+frontend-code/.swc/
+frontend-code/out/
+frontend-code/npm-debug.log*
+frontend-code/yarn-debug.log*
+frontend-code/yarn-error.log*
+frontend-code/pnpm-debug.log*
+
+# General Node (defensive, if structure changes later)
+node_modules/
+.next/
+.vercel/
+.turbo/
+out/
+
 .venv
 servers
