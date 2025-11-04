@@ -195,16 +195,23 @@ class Solvers_qiskit:
         sample = {i: bits[i] for i in range(len(bits))}
         return dimod.SampleSet.from_samples_bqm([sample], bqm)
 
-    @staticmethod
-    def exact_result(qp_bqm_tuple):
-        if not QISKIT_AVAILABLE:
-            raise ValueError("Qiskit packages not available. Cannot use exact_result solver.")
-        qp, bqm = qp_bqm_tuple
-        res = MinimumEigenOptimizer(NumPyMinimumEigensolver()).solve(qp)
-        return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res.x)
+    # @staticmethod
+    # def exact_result(qp_bqm_tuple):
+    #     print("HERE")
+    #     """
+    #     NumPyMinimumEigensolver -> SampleSet.
+    #     """
+    #     if not QISKIT_AVAILABLE:
+    #         raise ValueError("Qiskit packages not available. Cannot use exact_result solver.")
+    #     qp, bqm = qp_bqm_tuple
+    #     res = MinimumEigenOptimizer(NumPyMinimumEigensolver()).solve(qp)
+    #     return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res.x)
 
     @staticmethod
-    def qaoa(qp_bqm_tuple, reps=3, seed=42):
+    def qaoa(qp_bqm_tuple, reps=3, seed=30):
+        """
+        QAOA -> SampleSet.
+        """
         if not QISKIT_AVAILABLE:
             raise ValueError("Qiskit packages not available. Cannot use qaoa solver.")
         qp, bqm = qp_bqm_tuple
@@ -214,12 +221,15 @@ class Solvers_qiskit:
         res = MinimumEigenOptimizer(qaoa_mes).solve(qp)
         return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res.x)
 
-    @staticmethod
-    def simulated_annealing(qp_bqm_tuple):
-        if not CLASSICAL_OPT_AVAILABLE:
-            raise ValueError("Classical optimization packages not available. Cannot use simulated_annealing solver.")
-        _qp, bqm = qp_bqm_tuple
-        return SimulatedAnnealingSampler().sample(bqm, num_reads=100000)
+    # @staticmethod
+    # def simulated_annealing(qp_bqm_tuple):
+    #     """
+    #     Classical neal SA on BQM -> SampleSet.
+    #     """
+    #     if not CLASSICAL_OPT_AVAILABLE:
+    #         raise ValueError("Classical optimization packages not available. Cannot use simulated_annealing solver.")
+    #     _qp, bqm = qp_bqm_tuple
+    #     return SimulatedAnnealingSampler().sample(bqm, num_reads=100000)
 
 class Helping_functions:
     """
