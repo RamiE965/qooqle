@@ -14,7 +14,7 @@ from scipy.sparse import SparseEfficiencyWarning
 # Suppress scipy sparse matrix efficiency warnings
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
 
-from SSS_QUBO import QUBO_formulation, QUBO_Split_Optimization_func, Helping_functions
+from SSS_QUBO import QUBO_formulation, QUBO_Split_Optimization_func, Helping_functions, SolverType
 
 # Conditional import for plotting
 try:
@@ -664,7 +664,7 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
     original_stdout, sys.stdout = sys.stdout, StringIO()
     try:
         optimizer = QUBO_Split_Optimization_func(f"join_log_{num_tables}")
-        qubo_tree, _, error_msg = optimizer.finding_opt_jo(relations, weights, 'qaoa')
+        qubo_tree, _, error_msg = optimizer.finding_opt_jo(relations, weights, SolverType.QAOA)
     except Exception as e:
         qubo_tree, error_msg = None, str(e)
     finally:
