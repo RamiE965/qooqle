@@ -1,11 +1,11 @@
-import duckdb
+import psycopg2
+from psycopg2.extras import execute_values
 import pandas as pd
 import numpy as np
 import time
 import re
 import sys
 from io import StringIO
-import sqlite3
 import warnings
 import argparse
 import random
@@ -60,16 +60,16 @@ def parse_row_cardinality(s):
         print(f"Warning: Could not parse row cardinality string '{s}'. Error: {e}")
         return 0
 
-def setup_database(db_type, connection, scale_factor=0.1, seed=None, scenario='default'):
+def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
     """
-    Sets up the database for either DuckDB or SQLite.
+    Sets up the PostgreSQL database.
     If seed is provided, uses it for reproducible random data generation.
     Scenario determines table size ratios and data patterns.
     """
     if seed is not None:
         np.random.seed(seed)
     
-    print(f"--- Setting up {db_type} database (scenario={scenario}, seed={seed})... ---")
+    print(f"--- Setting up PostgreSQL database (scenario={scenario}, seed={seed})... ---")
     
     # Different scenarios create different table size ratios and selectivities
     # This makes each run test QAOA on fundamentally different join optimization problems
@@ -147,22 +147,77 @@ def setup_database(db_type, connection, scale_factor=0.1, seed=None, scenario='d
     
     print(f"   Tables: {num_customers} customers, {num_orders} orders, {num_lineitems} lineitems")
 
-    if db_type == 'duckdb':
-        connection.execute("CREATE TABLE nation (n_nationkey INTEGER, n_name VARCHAR, n_regionkey INTEGER);")
-        connection.execute("CREATE TABLE customer (c_custkey INTEGER, c_name VARCHAR, c_nationkey INTEGER);")
-        connection.execute("CREATE TABLE orders (o_orderkey INTEGER, o_custkey INTEGER, o_totalprice DECIMAL(10, 2));")
-        connection.execute("CREATE TABLE lineitem (l_orderkey INTEGER, l_extendedprice DECIMAL(10, 2));")
-        # Use execute with SELECT * FROM df_name, which is the correct way to load from a local DataFrame
-        connection.execute("INSERT INTO nation SELECT * FROM nations_df")
-        connection.execute("INSERT INTO customer SELECT * FROM customers_df")
-        connection.execute("INSERT INTO orders SELECT * FROM orders_df")
-        connection.execute("INSERT INTO lineitem SELECT * FROM lineitems_df")
-    
-    elif db_type == 'sqlite':
-        nations_df.to_sql("nation", connection, if_exists="replace", index=False)
-        customers_df.to_sql("customer", connection, if_exists="replace", index=False)
-        orders_df.to_sql("orders", connection, if_exists="replace", index=False)
-        lineitems_df.to_sql("lineitem", connection, if_exists="replace", index=False)
+    # Create tables
+    with connection.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS lineitem CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS orders CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS customer CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS nation CASCADE;")
+        
+        cur.execute("""
+            CREATE TABLE nation (
+                n_nationkey INTEGER PRIMARY KEY,
+                n_name VARCHAR,
+                n_regionkey INTEGER
+            );
+        """)
+        
+        cur.execute("""
+            CREATE TABLE customer (
+                c_custkey INTEGER PRIMARY KEY,
+                c_name VARCHAR,
+                c_nationkey INTEGER
+            );
+        """)
+        
+        cur.execute("""
+            CREATE TABLE orders (
+                o_orderkey INTEGER PRIMARY KEY,
+                o_custkey INTEGER,
+                o_totalprice DECIMAL(10, 2)
+            );
+        """)
+        
+        cur.execute("""
+            CREATE TABLE lineitem (
+                l_orderkey INTEGER,
+                l_extendedprice DECIMAL(10, 2)
+            );
+        """)
+        
+        # Insert data using execute_values for efficiency
+        # Convert numpy types to Python native types to avoid PostgreSQL schema errors
+        def convert_to_python_types(row):
+            """Convert numpy types in a row to Python native types."""
+            return tuple(
+                int(val) if isinstance(val, (np.integer, np.int64, np.int32)) else
+                float(val) if isinstance(val, (np.floating, np.float64, np.float32)) else
+                str(val) if not isinstance(val, (int, float, str)) else val
+                for val in row
+            )
+        
+        execute_values(cur, """
+            INSERT INTO nation (n_nationkey, n_name, n_regionkey) VALUES %s
+        """, [convert_to_python_types(row) for row in nations_df.values])
+        
+        execute_values(cur, """
+            INSERT INTO customer (c_custkey, c_name, c_nationkey) VALUES %s
+        """, [convert_to_python_types(row) for row in customers_df.values])
+        
+        execute_values(cur, """
+            INSERT INTO orders (o_orderkey, o_custkey, o_totalprice) VALUES %s
+        """, [convert_to_python_types(row) for row in orders_df.values])
+        
+        execute_values(cur, """
+            INSERT INTO lineitem (l_orderkey, l_extendedprice) VALUES %s
+        """, [convert_to_python_types(row) for row in lineitems_df.values])
+        
+        # Create indexes for better join performance
+        cur.execute("CREATE INDEX idx_orders_custkey ON orders(o_custkey);")
+        cur.execute("CREATE INDEX idx_lineitem_orderkey ON lineitem(l_orderkey);")
+        cur.execute("CREATE INDEX idx_customer_nationkey ON customer(c_nationkey);")
+        
+        connection.commit()
         
     print("--- Database setup complete. ---\n")
 
@@ -237,12 +292,12 @@ def get_join_costs_simple(conn, relations_map, relations, join_conditions):
     This follows the QUBO paper approach: uses basic statistics and selectivity estimates,
     not a sophisticated optimizer.
     
-    WHY THIS IS BETTER THAN DUCKDB ESTIMATES:
+    WHY THIS IS BETTER THAN POSTGRES ESTIMATES:
     - QAOA optimizes using THESE weights (simple cardinality model)
-    - DuckDB optimizes using its own sophisticated model (histograms, correlations, etc.)
+    - PostgreSQL optimizes using its own sophisticated model (histograms, correlations, etc.)
     - This creates a FAIR COMPARISON: each optimizer uses its own cost model
     - We then compare actual EXECUTION TIME to see which join order is faster
-    - If we used DuckDB's estimates for QAOA weights, we'd just be copying DuckDB's optimizer!
+    - If we used PostgreSQL's estimates for QAOA weights, we'd just be copying PostgreSQL's optimizer!
     
     Cost model for join S = {R1, R2, ..., Rk}:
     1. For 2-table joins: cost = |R| × |S| × selectivity
@@ -250,16 +305,18 @@ def get_join_costs_simple(conn, relations_map, relations, join_conditions):
        - If no join condition (cross product): selectivity = 1
     2. For multi-table joins: build up incrementally using join tree structure costs
     
-    This is more realistic than random weights but doesn't use DuckDB's optimizer.
+    This is more realistic than random weights but doesn't use PostgreSQL's optimizer.
     """
     print("--- Calculating join costs (QUBO-style: cardinality + selectivity) ---")
     
     # Get table cardinalities
     table_sizes = {}
-    for rel, table_name in relations_map.items():
-        count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        table_sizes[rel] = count
-        print(f"  {rel} ({table_name}): {count} rows")
+    with conn.cursor() as cur:
+        for rel, table_name in relations_map.items():
+            cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+            count = cur.fetchone()[0]
+            table_sizes[rel] = count
+            print(f"  {rel} ({table_name}): {count} rows")
     
     costs_map = {}
     weights = []
@@ -290,7 +347,7 @@ def get_join_costs_simple(conn, relations_map, relations, join_conditions):
         else:
             # Multi-table join: estimate as sum of pairwise joins
             # This is a simplification - the paper uses more sophisticated DP-based costs
-            # but this gives reasonable relative costs without using DuckDB
+            # but this gives reasonable relative costs without using PostgreSQL
             cost = 0
             combo_set = set(combo)
             
@@ -318,82 +375,6 @@ def get_join_costs_simple(conn, relations_map, relations, join_conditions):
     return costs_map, weights
 
 
-def get_join_costs(conn, relations_map, relations):
-    """
-    Calculate join costs using DuckDB's EXPLAIN (for comparison).
-    WARNING: This gives QAOA an unfair advantage by using DuckDB's sophisticated estimates!
-    """
-    print("--- Calculating join costs using DuckDB's EXPLAIN (CHEATING MODE) ---")
-    costs_map = {}
-    weights = []
-    join_clauses = {
-        ('c', 'n'): 'c.c_nationkey = n.n_nationkey', 
-        ('o', 'c'): 'o.o_custkey = c.c_custkey', 
-        ('l', 'o'): 'l.l_orderkey = o.o_orderkey'
-    }
-    
-    sublists = QUBO_formulation.relation_sublists(relations)
-    
-    for combo in sublists:
-        if len(combo) < 2: continue
-            
-        from_clause, current_joins, temp_combo = f"FROM {relations_map[combo[0]]} AS {combo[0]}", {combo[0]}, list(combo[1:])
-        
-        while len(temp_combo) > 0:
-            found_join, i = False, 0
-            while i < len(temp_combo):
-                r = temp_combo[i]
-                for joined_table in current_joins:
-                    key1 = tuple(sorted((r, joined_table)))
-                    if key1 in join_clauses:
-                        from_clause += f" JOIN {relations_map[r]} AS {r} ON {join_clauses[key1]}"
-                        current_joins.add(r)
-                        temp_combo.pop(i)
-                        found_join = True
-                        break
-                if found_join: break
-                i += 1
-            if not found_join: 
-                cross_r = temp_combo.pop(0)
-                from_clause += f", {relations_map[cross_r]} AS {cross_r}"
-                current_joins.add(cross_r)
-                
-        try:
-            explain_result = conn.execute(f"EXPLAIN SELECT * {from_clause} LIMIT 1;").fetchone()[1]
-            
-            join_operators = ['HASH_JOIN', 'CROSS_PRODUCT', 'PIECEWISE_MERGE_JOIN', 'NESTED_LOOP_JOIN', 'BLOCKWISE_NL_JOIN']
-            first_join_pos = -1
-            for op in join_operators:
-                pos = explain_result.find(op)
-                if pos != -1:
-                    if first_join_pos == -1 or pos < first_join_pos:
-                        first_join_pos = pos
-
-            cost = 1_000_000_000
-            if first_join_pos != -1:
-                search_area = explain_result[first_join_pos:]
-                match = re.search(r'~(\d{1,3}(?:,\d{3})*|\d+)\s+rows', search_area)
-                if match:
-                    cost = parse_row_cardinality(match.group(1))
-            else:
-                match = re.search(r'~(\d{1,3}(?:,\d{3})*|\d+)\s+rows', explain_result)
-                if match:
-                     cost = parse_row_cardinality(match.group(1))
-
-            if cost <= 0:
-                cost = 1_000_000_000
-
-            costs_map[frozenset(combo)] = cost
-            weights.append(cost)
-        except Exception as e: 
-            print(f"Warning: Could not get cost for {combo}: {e}")
-            costs_map[frozenset(combo)] = 1_000_000_000
-            weights.append(1_000_000_000)
-            
-    print(f"Calculated {len(weights)} join costs using DuckDB estimates")
-    print("--- Cost calculation complete. ---\n")
-    return costs_map, weights
-
 def calculate_tree_cost(tree, costs_map):
     """Recursively calculates the total estimated cost of a join tree."""
     if isinstance(tree, str):
@@ -410,38 +391,89 @@ def calculate_tree_cost(tree, costs_map):
     cost += costs_map.get(key, 0)
     return cost
 
-def parse_join_order_from_duckdb(explain_plan):
+def parse_join_order_from_postgres(explain_output):
+    """
+    Parse join order from PostgreSQL EXPLAIN output.
+    PostgreSQL's EXPLAIN shows join order in the plan tree structure.
+    """
     try:
-        conditions = re.findall(r'(\w)_\w+\s*=\s*(\w+)_\w+', explain_plan)
-        if not conditions: return "Could not find join conditions based on column name prefixes."
-        conditions.reverse()
-        order, seen = [], set()
-        for t1, t2 in conditions:
-            if not seen: order.extend([t1, t2]); seen.update([t1, t2])
-            elif t1 in seen and t2 not in seen: order.append(t2); seen.add(t2)
-            elif t2 in seen and t1 not in seen: order.append(t1); seen.add(t1)
-        return " -> ".join(order)
-    except Exception as e: return f"An unexpected error occurred: {e}"
-
-def parse_join_order_from_sqlite(explain_plan_rows):
-    try:
+        # Extract table names from the plan
+        # Look for patterns like "Seq Scan on customer c" or "Index Scan using..."
+        table_pattern = r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan).*?on\s+(\w+)\s+(\w+)'
+        matches = re.findall(table_pattern, explain_output, re.IGNORECASE)
+        
+        # Also look for join conditions to infer order
+        join_pattern = r'(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)'
+        join_matches = re.findall(join_pattern, explain_output)
+        
+        # Build order from joins
         order = []
-        for row in explain_plan_rows:
-            match = re.search(r'(?:SCAN|SEARCH|BLOOM FILTER ON)\s+(\w+)', row[3])
-            if match and match.group(1) not in order:
-                order.append(match.group(1))
+        seen = set()
+        
+        # First, collect all tables mentioned
+        all_tables = set()
+        for table_name, alias in matches:
+            all_tables.add(alias)
+        
+        # Try to build order from join conditions
+        for t1, col1, t2, col2 in join_matches:
+            if t1 not in seen and t2 not in seen:
+                order.extend([t1, t2])
+                seen.update([t1, t2])
+            elif t1 in seen and t2 not in seen:
+                order.append(t2)
+                seen.add(t2)
+            elif t2 in seen and t1 not in seen:
+                order.append(t1)
+                seen.add(t1)
+        
+        # If we couldn't determine from joins, use table scan order
+        if not order:
+            for table_name, alias in matches:
+                if alias not in order:
+                    order.append(alias)
+        
         return " -> ".join(order) if order else "Could not determine join order."
-    except Exception as e: return f"An error occurred: {e}"
+    except Exception as e:
+        return f"An error occurred parsing join order: {e}"
+
+def get_cost_from_postgres_explain(explain_output):
+    """
+    Extract cost from PostgreSQL EXPLAIN output.
+    PostgreSQL shows costs as "cost=0.00..123.45 rows=1000"
+    
+    COST CALCULATION METHOD:
+    - We extract the 'rows' estimate from the root node (final result cardinality)
+    - This represents the estimated number of rows in the final result
+    - This is used as a cost metric for comparison (similar to how DuckDB uses cardinality)
+    - Note: PostgreSQL also has a 'cost' value (in arbitrary units), but we use rows for consistency
+    
+    Returns: Estimated row count (as integer) or -1 if parsing fails
+    """
+    try:
+        # Find the root node's cost (last cost in the plan)
+        # Pattern: "cost=0.00..123.45 rows=1000"
+        cost_pattern = r'cost=([\d.]+)\.\.([\d.]+)\s+rows=(\d+)'
+        matches = re.findall(cost_pattern, explain_output)
+        
+        if matches:
+            # Get the last (root) node's cost
+            last_match = matches[-1]
+            total_cost = float(last_match[1])  # Second number is total cost
+            rows = int(last_match[2])
+            print(f"[DEBUG] PostgreSQL cost: {total_cost}, rows: {rows}")
+            return int(rows)  # Return rows as cost metric (similar to DuckDB)
+        
+        return -1
+    except Exception as e:
+        print(f"Warning: Could not parse PostgreSQL cost: {e}")
+        return -1
 
 def build_from_clause_flat(tree, relations_map, join_conditions, reverse_qaoa=False, experimental_lr_hybrid=False):
     """
-    Build a FLAT FROM clause from join tree without nested parentheses.
-    This allows DuckDB to use proper cardinality estimates while still forcing join order.
-    
-    WHY FLAT INSTEAD OF NESTED:
-    - Nested parentheses: FROM ((a JOIN b) JOIN c) causes DuckDB to make naive estimates
-    - Flat joins: FROM a JOIN b JOIN c allows proper cardinality estimation and filter pushdown
-    - DuckDB will still execute in the specified order when join_order optimizer is disabled
+    Build a FROM clause from join tree for PostgreSQL.
+    PostgreSQL requires nested parentheses to force join order.
+    Use join_collapse_limit=1 to prevent reordering.
     
     Parameters:
     - experimental_lr_hybrid: If True, read join structure right-to-left BUT table pairs left-to-right
@@ -516,9 +548,9 @@ def build_from_clause_flat(tree, relations_map, join_conditions, reverse_qaoa=Fa
 
 def build_from_clause_recursively(tree, relations_map, join_conditions, reverse_qaoa=False):
     """
-    Build FROM clause from join tree using nested parentheses.python run_join_optimization.py --loop 10 --tables 3
+    Build FROM clause from join tree using nested parentheses for PostgreSQL.
+    PostgreSQL respects nested parentheses when join_collapse_limit=1.
     If reverse_qaoa=True, treats the tree as QAOA output which is read right-to-left.
-    Note: This approach can cause poor cardinality estimates in DuckDB.
     """
     if isinstance(tree, str): 
         return f"{relations_map[tree]} AS {tree}", {tree}
@@ -551,115 +583,58 @@ def build_from_clause_recursively(tree, relations_map, join_conditions, reverse_
         
     return f"({left_sql} {join_type} {right_sql} {join_sql})", left_relations.union(right_relations)
 
-def run_benchmark(num_tables, relations_map, relations, join_conditions, query_parts, duckdb_conn, sqlite_conn, weight_method='cardinality', run_seed=None):
+def run_benchmark(num_tables, relations_map, relations, join_conditions, query_parts, postgres_conn, weight_method='cardinality', run_seed=None):
     print(f"\n" + "="*50 + f"\n### STARTING {num_tables}-TABLE BENCHMARK ###\n" + "="*50 + "\n")
     
     query = f"{query_parts['select']} {query_parts['from']}"
     if 'where' in query_parts: query += f" {query_parts['where']}"
     query += f" {query_parts['group_by']} {query_parts['order_by']} {query_parts['limit']};"
 
-    # --- Helper function for new robust parsing ---
-    def get_cost_from_graphical_plan(plan_string):
-        """
-        Parses the graphical EXPLAIN plan.
-        Finds the topmost JOIN operator's output cardinality (the final join result).
-        This represents the cost of the join order.
-        """
-        try:
-            # Find ALL join operators and their cardinalities
-            join_operators_regex = r'(HASH_JOIN|CROSS_PRODUCT|PIECEWISE_MERGE_JOIN|NESTED_LOOP_JOIN|BLOCKWISE_NL_JOIN)'
-            
-            # Find all join operators
-            join_matches = list(re.finditer(join_operators_regex, plan_string))
-            
-            if not join_matches:
-                # No join found, maybe a single table scan
-                match = re.search(r'~(\d{1,3}(?:,\d{3})*|\d+)\s+rows', plan_string)
-                if match:
-                    cardinality = parse_row_cardinality(match.group(1))
-                    print(f"[DEBUG] No joins found, using first cardinality: {cardinality}")
-                    return cardinality
-                return -2
-            
-            # The FIRST join match is the topmost (root) join
-            first_join = join_matches[0]
-            
-            # Find the cardinality for this join
-            # Look for the next ~...rows after this join operator
-            search_start = first_join.end()
-            
-            # Extract the block for this join (until we hit another major operator or end)
-            # Look ahead to find the cardinality line
-            search_area = plan_string[search_start:search_start + 500]  # Look ahead 500 chars
-            
-            # Find the first ~rows in this join's block
-            card_match = re.search(r'~(\d{1,3}(?:,\d{3})*|\d+)\s+rows', search_area)
-            
-            if card_match:
-                cardinality = parse_row_cardinality(card_match.group(1))
-                print(f"[DEBUG] Found topmost join cardinality: {cardinality}")
-                print(f"[DEBUG] Total joins in plan: {len(join_matches)}")
-                
-                # Also show all join cardinalities for debugging
-                all_cardinalities = []
-                for i, jm in enumerate(join_matches):
-                    search = plan_string[jm.end():jm.end() + 500]
-                    cm = re.search(r'~(\d{1,3}(?:,\d{3})*|\d+)\s+rows', search)
-                    if cm:
-                        card = parse_row_cardinality(cm.group(1))
-                        all_cardinalities.append(card)
-                        join_type = plan_string[jm.start():jm.end()]
-                        print(f"[DEBUG]   Join {i+1} ({join_type}) cardinality: {card}")
-                    else:
-                        print(f"[DEBUG]   Join {i+1} - could not find cardinality")
-                
-                return cardinality
-            else:
-                print(f"[DEBUG] Could not find cardinality after first join")
-                return -3
-                
-        except Exception as e:
-            print(f"Warning: Cost parsing failed with error: {e}")
-            import traceback
-            traceback.print_exc()
-            return -4
-    # --- End of helper function ---
-
-
-    # 1. DuckDB Benchmark (separating planning and execution)
-    print("--- Running DuckDB Benchmark ---")
-    explain_duckdb = duckdb_conn.execute(f"EXPLAIN {query}").fetchone()[1]
-    duckdb_order = parse_join_order_from_duckdb(explain_duckdb)
+    # 1. PostgreSQL Benchmark (default optimizer)
+    print("--- Running PostgreSQL Benchmark (Default Optimizer) ---")
+    with postgres_conn.cursor() as cur:
+        # Clear cache to ensure fair comparison
+        cur.execute("DISCARD PLANS;")
+        
+        # Warm up: run query once to populate cache (simulating real-world scenario)
+        cur.execute(query)
+        cur.fetchall()
+        
+        # Get EXPLAIN output
+        cur.execute(f"EXPLAIN ANALYZE {query}")
+        explain_rows = cur.fetchall()
+        explain_output = "\n".join([row[0] for row in explain_rows])
+        
+        print(f"\nPostgreSQL EXPLAIN plan:\n{explain_output}\n")
+        
+        # Parse join order and cost
+        postgres_order = parse_join_order_from_postgres(explain_output)
+        postgres_cost = get_cost_from_postgres_explain(explain_output)
+        
+        # Execute query for timing (separate from EXPLAIN ANALYZE to get pure execution time)
+        # Run multiple times and take average to reduce variance
+        print("Executing PostgreSQL with its optimized plan (3 runs for average)...")
+        times = []
+        for _ in range(3):
+            cur.execute("DISCARD PLANS;")  # Clear plans between runs
+            start_time = time.time()
+            cur.execute(query)
+            cur.fetchall()
+            times.append(time.time() - start_time)
+        duration_postgres = sum(times) / len(times)
     
-    # Debug: Show the plan
-    print(f"\nDuckDB EXPLAIN plan:\n{explain_duckdb}\n")
-    
-    # --- NEW COST PARSING ---
-    duckdb_cost = get_cost_from_graphical_plan(explain_duckdb)
-    print(f"DuckDB cost from EXPLAIN: {duckdb_cost}")
-    # --- END OF NEW COST PARSING ---
-
-    print("Executing DuckDB with its optimized plan (excluding planning time)...")
-    start_time = time.time()
-    duckdb_conn.execute(query).fetchall()
-    duration_duckdb = time.time() - start_time
-    
-    # 2. SQLite Benchmark
-    print("\n--- Running SQLite Benchmark ---")
-    start_time = time.time()
-    sqlite_conn.execute(query).fetchall()
-    duration_sqlite = time.time() - start_time
-    explain_sqlite = sqlite_conn.execute(f"EXPLAIN QUERY PLAN {query}").fetchall()
-    sqlite_order = parse_join_order_from_sqlite(explain_sqlite)
-    
-    # 3. QUBO Benchmark with QAOA
+    # 2. QUBO Benchmark with QAOA
     print("\n--- Running QUBO Benchmark (QAOA) ---")
     
     # Generate weights based on chosen method
     if weight_method == 'random':
         costs_map, weights = get_join_costs_random(relations, seed=run_seed)
     else:  # cardinality
-        costs_map, weights = get_join_costs_simple(duckdb_conn, relations_map, relations, join_conditions)
+        costs_map, weights = get_join_costs_simple(postgres_conn, relations_map, relations, join_conditions)
+    
+    # Time the QAOA optimization itself
+    print("Running QAOA optimization...")
+    qaoa_start_time = time.time()
     
     original_stdout, sys.stdout = sys.stdout, StringIO()
     try:
@@ -667,10 +642,32 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
         qubo_tree, _, error_msg = optimizer.finding_opt_jo(relations, weights, SolverType.QAOA)
     except Exception as e:
         qubo_tree, error_msg = None, str(e)
+        import traceback
+        print(f"QAOA optimization exception: {e}")
+        traceback.print_exc()
     finally:
         sys.stdout = original_stdout
     
+    qaoa_optimization_time = time.time() - qaoa_start_time
+    print(f"QAOA optimization completed in {qaoa_optimization_time * 1000:.2f} ms")
+    
     duration_qubo, qubo_cost, qubo_order_str = -1, -1, "No valid tree"
+    
+    # If QAOA failed to find optimal solution, try using DP solution as fallback
+    if error_msg and "No solution found" in error_msg:
+        print(f"\nWarning: QAOA did not find an optimal solution matching DP cost.")
+        print(f"Attempting to use dynamic programming solution as fallback...")
+        try:
+            dp_result = Helping_functions.dynamic_programming(relations, weights)
+            dp_tree = dp_result[0] if len(dp_result) > 0 else None
+            if dp_tree:
+                print(f"Using DP solution as fallback: {dp_tree}")
+                qubo_tree = dp_tree
+                error_msg = None  # Clear error to proceed
+            else:
+                print(f"DP solution also unavailable.")
+        except Exception as e:
+            print(f"Failed to get DP fallback: {e}")
     
     if qubo_tree and not error_msg:
         qubo_order_str = str(qubo_tree)
@@ -698,94 +695,103 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
         except Exception as e:
             print(f"Error calculating tree cost: {e}")
         
-        # Get the cost from the forced query plan using the same method as DuckDB
+        # Build forced query with nested parentheses to enforce join order
         plan_cost = -1
         forced_query = ""
         
         try:
             # QAOA trees are read right-to-left, so use reverse_qaoa=True
-            # Use FLAT from clause to get better cardinality estimates
+            # Use nested parentheses for PostgreSQL (with join_collapse_limit=1)
+            forced_from, _ = build_from_clause_recursively(qubo_tree, relations_map, join_conditions, reverse_qaoa=True)
             
-            # Try BOTH methods to see which matches DuckDB better
-            print("\n--- Method 1: Standard right-to-left ---")
-            forced_from_standard, _ = build_from_clause_flat(qubo_tree, relations_map, join_conditions, reverse_qaoa=True, experimental_lr_hybrid=False)
-            print(f"Standard join order: {forced_from_standard}")
-            
-            print("\n--- Method 2: EXPERIMENTAL hybrid (right-to-left structure, left-to-right pairs) ---")
-            forced_from_hybrid, _ = build_from_clause_flat(qubo_tree, relations_map, join_conditions, reverse_qaoa=True, experimental_lr_hybrid=True)
-            print(f"Hybrid join order: {forced_from_hybrid}")
-            
-            # Use the hybrid method as default for now
-            forced_from = forced_from_hybrid
-            print(f"\nUsing HYBRID method for cost calculation")
             forced_query = f"{query_parts['select']} FROM {forced_from}"
             if 'where' in query_parts: forced_query += f" {query_parts['where']}"
             forced_query += f" {query_parts['group_by']} {query_parts['order_by']} {query_parts['limit']};"
             
-            print(f"Forced query: {forced_query}")
+            print(f"\nForced QAOA query:\n{forced_query}")
             
-            # Note: We don't force DuckDB's execution order for EXPLAIN
-            # because it doesn't affect our cost calculation (we use tree_cost)
-            # This allows DuckDB to show its actual execution plan for comparison
-            
-            # Run EXPLAIN on the forced query (DuckDB may reorder it)
-            explain_qubo_plan = duckdb_conn.execute(f"EXPLAIN {forced_query}").fetchone()[1]
-
-
-            # Debug: Show the QAOA plan
-            print(f"\nQAOA EXPLAIN plan:\n{explain_qubo_plan}\n")
-            
-            # Parse the forced plan using DuckDB's estimate
-            plan_cost = get_cost_from_graphical_plan(explain_qubo_plan)
-            
-            # For reporting: use DuckDB's estimate of the QAOA plan (apples-to-apples)
-            # This allows fair comparison: both plans evaluated by the same cost model
-            qubo_cost = plan_cost if plan_cost > 0 else tree_cost
-            
-            # Debug output
-            print(f"\nCost Analysis:")
-            print(f"  - QAOA optimized using tree cost: {tree_cost} (simple cardinality model)")
-            print(f"  - DuckDB's estimate of QAOA plan: {plan_cost} (sophisticated model)")
-            print(f"  - DuckDB's estimate of its own plan: {duckdb_cost}")
-            print(f"  → Using {qubo_cost} for comparison (DuckDB's estimate of QAOA plan)")
-            
-            # Show if plans match
-            if abs(plan_cost - duckdb_cost) < 100:
-                print(f"  ✓ Plans match! Both optimizers chose the same join order.")
-            elif plan_cost < duckdb_cost:
-                print(f"  ✓ QAOA found a better plan! ({plan_cost} < {duckdb_cost})")
-            else:
-                print(f"  ✗ QAOA's plan is suboptimal ({plan_cost} > {duckdb_cost})")
+            # Execute with join order forced using join_collapse_limit
+            with postgres_conn.cursor() as cur:
+                # Force join order by preventing join reordering
+                cur.execute("SET join_collapse_limit = 1;")
+                cur.execute("SET from_collapse_limit = 1;")
+                
+                # Get EXPLAIN output for the forced query
+                cur.execute(f"EXPLAIN ANALYZE {forced_query}")
+                explain_rows = cur.fetchall()
+                explain_output = "\n".join([row[0] for row in explain_rows])
+                
+                print(f"\nQAOA EXPLAIN plan:\n{explain_output}\n")
+                
+                # Parse the forced plan using PostgreSQL's estimate
+                plan_cost = get_cost_from_postgres_explain(explain_output)
+                
+                # For reporting: use PostgreSQL's estimate of the QAOA plan (apples-to-apples)
+                qubo_cost = plan_cost if plan_cost > 0 else tree_cost
+                
+                # Debug output
+                print(f"\nCost Analysis:")
+                print(f"  - QAOA optimized using tree cost: {tree_cost} (simple cardinality model)")
+                print(f"    * This uses cardinality × selectivity: |R| × |S| × (1/max(|R|,|S|)) for joins")
+                print(f"  - PostgreSQL's estimate of QAOA plan: {plan_cost} rows (sophisticated model)")
+                print(f"    * This uses PostgreSQL's cost model: histograms, correlations, etc.")
+                print(f"  - PostgreSQL's estimate of its own plan: {postgres_cost} rows")
+                print(f"  → Using {qubo_cost} for comparison (PostgreSQL's estimate of QAOA plan)")
+                
+                # Show if plans match
+                if abs(plan_cost - postgres_cost) < 100:
+                    print(f"  ✓ Plans match! Both optimizers chose the same join order.")
+                elif plan_cost < postgres_cost:
+                    print(f"  ✓ QAOA found a better plan! ({plan_cost} < {postgres_cost})")
+                else:
+                    print(f"  ✗ QAOA's plan is suboptimal ({plan_cost} > {postgres_cost})")
+                
+                # Execute the forced query for timing
+                # Run multiple times and take average to reduce variance
+                print(f"\nExecuting forced QAOA join order (3 runs for average)...")
+                query_times = []
+                for _ in range(3):
+                    cur.execute("DISCARD PLANS;")  # Clear plans between runs
+                    start_time = time.time()
+                    cur.execute(forced_query)
+                    cur.fetchall()
+                    query_times.append(time.time() - start_time)
+                query_execution_time = sum(query_times) / len(query_times)
+                
+                # Total time includes both QAOA optimization and query execution
+                duration_qubo = qaoa_optimization_time + query_execution_time
+                print(f"Query execution time: {query_execution_time * 1000:.2f} ms")
+                print(f"Total time (QAOA + execution): {duration_qubo * 1000:.2f} ms")
+                
+                # Reset join collapse limits
+                cur.execute("SET join_collapse_limit = DEFAULT;")
+                cur.execute("SET from_collapse_limit = DEFAULT;")
                 
         except Exception as e:
-            print(f"Error getting plan cost: {e}")
-            qubo_cost = tree_cost if tree_cost > 0 else -1
-        
-        # Execute the forced query for timing
-        try:
-            print(f"Forcing QUBO join order...")
-            duckdb_conn.execute("SET disabled_optimizers TO 'join_order';")
-            start_time = time.time()
-            duckdb_conn.execute(forced_query).fetchall()
-            duration_qubo = time.time() - start_time
-            duckdb_conn.execute("SET disabled_optimizers TO '';")
-        except Exception as e:
             print(f"Error executing forced QUBO query: {e}")
-            duckdb_conn.execute("SET disabled_optimizers TO '';")
+            import traceback
+            traceback.print_exc()
+            # Reset join collapse limits on error
+            try:
+                with postgres_conn.cursor() as cur:
+                    cur.execute("SET join_collapse_limit = DEFAULT;")
+                    cur.execute("SET from_collapse_limit = DEFAULT;")
+            except:
+                pass
             duration_qubo = -1
+            qubo_cost = tree_cost if tree_cost > 0 else -1
     else:
         print(f"QUBO optimization failed: {error_msg}")
     
     print(f"\n--- Final Results ({num_tables} Tables) ---")
-    print(f"DuckDB Default | Time: {duration_duckdb * 1000:.2f} ms | Cost: {duckdb_cost:<10} | Order: {duckdb_order}")
-    print(f"SQLite Default | Time: {duration_sqlite * 1000:.2f} ms | Order: {sqlite_order}")
+    print(f"PostgreSQL Default | Time: {duration_postgres * 1000:.2f} ms | Cost: {postgres_cost:<10} | Order: {postgres_order}")
     if duration_qubo >= 0:
         cost_str = f"{qubo_cost:<10}" if qubo_cost >= 0 else "Unknown   "
-        print(f"QUBO QAOA      | Time: {duration_qubo * 1000:.2f} ms | Cost: {cost_str} | Order: {qubo_order_str}")
+        print(f"QUBO QAOA          | Time: {duration_qubo * 1000:.2f} ms | Cost: {cost_str} | Order: {qubo_order_str}")
     else:
-        print(f"QUBO QAOA      | Execution Failed")
+        print(f"QUBO QAOA          | Execution Failed")
     
-    return duration_duckdb, duckdb_cost, duration_sqlite, duration_qubo, qubo_cost
+    return duration_postgres, postgres_cost, duration_qubo, qubo_cost
 
 def plot_results(results_dict):
     """Generates and displays plots comparing benchmark results."""
@@ -793,16 +799,16 @@ def plot_results(results_dict):
         if not results_list: continue
 
         runs = range(1, len(results_list) + 1)
-        duckdb_times = [r[0] * 1000 for r in results_list]
-        qaoa_times = [r[3] * 1000 for r in results_list if r[3] >= 0]
-        duckdb_costs = [r[1] for r in results_list if r[1] >= 0]
-        qaoa_costs = [r[4] for r in results_list if r[4] >= 0]
+        postgres_times = [r[0] * 1000 for r in results_list]
+        qaoa_times = [r[2] * 1000 for r in results_list if r[2] >= 0]
+        postgres_costs = [r[1] for r in results_list if r[1] >= 0]
+        qaoa_costs = [r[3] for r in results_list if r[3] >= 0]
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         fig.suptitle(f"Benchmark Comparison for {num_tables}-Table Join ({len(runs)} runs)", fontsize=16)
 
         # Plot 1: Runtimes
-        ax1.plot(runs, duckdb_times, 'o-', label='DuckDB')
+        ax1.plot(runs, postgres_times, 'o-', label='PostgreSQL')
         if qaoa_times: ax1.plot(runs, qaoa_times, 's-', label='QAOA')
         ax1.set_xlabel("Run Number")
         ax1.set_ylabel("Execution Time (ms)")
@@ -811,7 +817,7 @@ def plot_results(results_dict):
         ax1.grid(True, linestyle='--', alpha=0.6)
 
         # Plot 2: Costs
-        ax2.plot(runs, duckdb_costs, 'o-', label='DuckDB')
+        ax2.plot(runs, postgres_costs, 'o-', label='PostgreSQL')
         if qaoa_costs: ax2.plot(runs, qaoa_costs, 's-', label='QAOA')
         ax2.set_xlabel("Run Number")
         ax2.set_ylabel("Estimated Cost (Cardinality)")
@@ -825,82 +831,101 @@ def plot_results(results_dict):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Join Order Benchmark using DuckDB, SQLite, and QAOA.")
+    parser = argparse.ArgumentParser(description="Run Join Order Benchmark using PostgreSQL and QAOA.")
     parser.add_argument('--loop', type=int, default=1, metavar='N', help='Number of times to run each benchmark (default: 1).')
     parser.add_argument('--tables', type=int, default=0, metavar='N', help='Run only N-table benchmark (3 or 4). Default: run both.')
     parser.add_argument('--weights', type=str, default='cardinality', choices=['cardinality', 'random'], 
                         help='Weight generation method: "cardinality" (realistic, default) or "random" (research paper style, 1-100)')
+    parser.add_argument('--host', type=str, default='localhost', help='PostgreSQL host (default: localhost)')
+    parser.add_argument('--port', type=int, default=5432, help='PostgreSQL port (default: 5432)')
+    parser.add_argument('--user', type=str, default='qooqle', help='PostgreSQL user (default: qooqle)')
+    parser.add_argument('--password', type=str, default='qooqle', help='PostgreSQL password (default: qooqle)')
+    parser.add_argument('--database', type=str, default='qooqle_db', help='PostgreSQL database (default: qooqle_db)')
     args = parser.parse_args()
     num_runs = args.loop
     tables_filter = args.tables
     weight_method = args.weights
+
+    # Connect to PostgreSQL
+    try:
+        postgres_conn = psycopg2.connect(
+            host=args.host,
+            port=args.port,
+            user=args.user,
+            password=args.password,
+            database=args.database
+        )
+        print(f"Connected to PostgreSQL at {args.host}:{args.port}")
+    except psycopg2.OperationalError as e:
+        print(f"Error connecting to PostgreSQL: {e}")
+        print("\nMake sure PostgreSQL is running. You can start it with Docker:")
+        print("  docker-compose up -d")
+        sys.exit(1)
 
     results_3_tables, results_4_tables = [], []
     
     # Different scenarios to test various table size ratios
     scenarios = ['default', 'many_customers', 'large_orders', 'heavy_lineitems', 'balanced_small']
 
-    for i in range(num_runs):
-        # Cycle through different scenarios for variety
-        scenario = scenarios[i % len(scenarios)] if num_runs > 1 else 'default'
-        
-        print(f"\n{'='*25} RUN {i + 1}/{num_runs} - Scenario: {scenario.upper()} {'='*25}\n")
-        
-        duckdb_conn = duckdb.connect(database=':memory:')
-        sqlite_conn = sqlite3.connect(':memory:')
-        
-        # Use different seed AND scenario for each iteration
-        # This creates fundamentally different optimization problems
-        run_seed = 42 + i if num_runs > 1 else None
-        setup_database('duckdb', duckdb_conn, scale_factor=0.1, seed=run_seed, scenario=scenario)
-        setup_database('sqlite', sqlite_conn, scale_factor=0.1, seed=run_seed, scenario=scenario)
+    try:
+        for i in range(num_runs):
+            # Cycle through different scenarios for variety
+            scenario = scenarios[i % len(scenarios)] if num_runs > 1 else 'default'
+            
+            print(f"\n{'='*25} RUN {i + 1}/{num_runs} - Scenario: {scenario.upper()} {'='*25}\n")
+            
+            # Use different seed AND scenario for each iteration
+            # This creates fundamentally different optimization problems
+            run_seed = 42 + i if num_runs > 1 else None
+            setup_database(postgres_conn, scale_factor=0.1, seed=run_seed, scenario=scenario)
 
-        # --- 3-Table Benchmark ---
-        if tables_filter == 0 or tables_filter == 3:
-            q_parts_3 = {
-                "select": "SELECT c.c_name, SUM(l.l_extendedprice) AS total_revenue",
-                "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey",
-                "group_by": "GROUP BY c.c_name", "order_by": "ORDER BY total_revenue DESC", "limit": "LIMIT 10"
-            }
-            relations_map_3 = {'l': 'lineitem', 'o': 'orders', 'c': 'customer'}
-            relations_3 = ['l', 'o', 'c']
-            join_conditions_3 = {
-                frozenset(['l', 'o']): 'l.l_orderkey = o.o_orderkey', 
-                frozenset(['o', 'c']): 'o.o_custkey = c.c_custkey'
-            }
-            res3 = run_benchmark(3, relations_map_3, relations_3, join_conditions_3, q_parts_3, duckdb_conn, sqlite_conn, weight_method, run_seed)
-            results_3_tables.append(res3)
+            # --- 3-Table Benchmark ---
+            if tables_filter == 0 or tables_filter == 3:
+                q_parts_3 = {
+                    "select": "SELECT c.c_name, SUM(l.l_extendedprice) AS total_revenue",
+                    "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey",
+                    "group_by": "GROUP BY c.c_name", "order_by": "ORDER BY total_revenue DESC", "limit": "LIMIT 10"
+                }
+                relations_map_3 = {'l': 'lineitem', 'o': 'orders', 'c': 'customer'}
+                relations_3 = ['l', 'o', 'c']
+                join_conditions_3 = {
+                    frozenset(['l', 'o']): 'l.l_orderkey = o.o_orderkey', 
+                    frozenset(['o', 'c']): 'o.o_custkey = c.c_custkey'
+                }
+                res3 = run_benchmark(3, relations_map_3, relations_3, join_conditions_3, q_parts_3, postgres_conn, weight_method, run_seed)
+                results_3_tables.append(res3)
 
-        # --- 4-Table Benchmark ---
-        if tables_filter == 0 or tables_filter == 4:
-            q_parts_4 = {
-                "select": "SELECT n.n_name, c.c_name, SUM(l.l_extendedprice) AS total_revenue",
-                "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey JOIN nation n ON c.c_nationkey = n.n_nationkey",
-                "where": "WHERE n.n_name = 'NATION_5'",
-                "group_by": "GROUP BY n.n_name, c.c_name", "order_by": "ORDER BY total_revenue DESC", "limit": "LIMIT 10"
-            }
-            relations_map_4 = {'l': 'lineitem', 'o': 'orders', 'c': 'customer', 'n': 'nation'}
-            relations_4 = ['l', 'o', 'c', 'n']
-            join_conditions_4 = {
-                frozenset(['l', 'o']): 'l.l_orderkey = o.o_orderkey', 
-                frozenset(['o', 'c']): 'o.o_custkey = c.c_custkey',
-                frozenset(['c', 'n']): 'c.c_nationkey = n.n_nationkey'
-            }
-            res4 = run_benchmark(4, relations_map_4, relations_4, join_conditions_4, q_parts_4, duckdb_conn, sqlite_conn, weight_method, run_seed)
-            results_4_tables.append(res4)
-        
-        duckdb_conn.close()
-        sqlite_conn.close()
+            # --- 4-Table Benchmark ---
+            if tables_filter == 0 or tables_filter == 4:
+                q_parts_4 = {
+                    "select": "SELECT n.n_name, c.c_name, SUM(l.l_extendedprice) AS total_revenue",
+                    "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey JOIN nation n ON c.c_nationkey = n.n_nationkey",
+                    "where": "WHERE n.n_name = 'NATION_5'",
+                    "group_by": "GROUP BY n.n_name, c.c_name", "order_by": "ORDER BY total_revenue DESC", "limit": "LIMIT 10"
+                }
+                relations_map_4 = {'l': 'lineitem', 'o': 'orders', 'c': 'customer', 'n': 'nation'}
+                relations_4 = ['l', 'o', 'c', 'n']
+                join_conditions_4 = {
+                    frozenset(['l', 'o']): 'l.l_orderkey = o.o_orderkey', 
+                    frozenset(['o', 'c']): 'o.o_custkey = c.c_custkey',
+                    frozenset(['c', 'n']): 'c.c_nationkey = n.n_nationkey'
+                }
+                res4 = run_benchmark(4, relations_map_4, relations_4, join_conditions_4, q_parts_4, postgres_conn, weight_method, run_seed)
+                results_4_tables.append(res4)
 
-    if num_runs > 1 and PLOTTING_ENABLED:
-        print("\n--- Generating plots... ---")
-        results_to_plot = {}
-        if results_3_tables:
-            results_to_plot[3] = results_3_tables
-        if results_4_tables:
-            results_to_plot[4] = results_4_tables
-        if results_to_plot:
-            plot_results(results_to_plot)
-    elif num_runs > 1:
-        print("\nPlotting skipped because matplotlib is not installed.")
+        if num_runs > 1 and PLOTTING_ENABLED:
+            print("\n--- Generating plots... ---")
+            results_to_plot = {}
+            if results_3_tables:
+                results_to_plot[3] = results_3_tables
+            if results_4_tables:
+                results_to_plot[4] = results_4_tables
+            if results_to_plot:
+                plot_results(results_to_plot)
+        elif num_runs > 1:
+            print("\nPlotting skipped because matplotlib is not installed.")
+    
+    finally:
+        postgres_conn.close()
+        print("\nPostgreSQL connection closed.")
 

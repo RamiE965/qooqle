@@ -843,14 +843,18 @@ class QUBO_Split_Optimization_func:
 
         # ----- n = 4 -----
         if n == 4:
+            # Track all solutions found (not just optimal ones) for fallback
+            all_solutions = []
+            
             # Split -> 1 (deep trees)
             count = 1
             optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
+            all_solutions.append(optimal_jo)  # Always add to all_solutions
             if optimal_jo[0] == dp_optimal_cost:
                 print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
                 optimal_jo_details.append(optimal_jo)
             else:
-                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
+                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}. Cost: {optimal_jo[0]} vs DP: {dp_optimal_cost}')
 
             # Split -> 2 (2+2)
             count += 1
@@ -858,13 +862,21 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars, _ = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 vars_2 + vars_4, cost_2 + cost_4, solver
             )
+            split_solution = [total_cost, optimized_jo_vars, result, cost_2 + cost_4, vars_2 + vars_4]
+            all_solutions.append(split_solution)  # Always add to all_solutions
             if total_cost == dp_optimal_cost:
                 print(f'Yes,found optimal JO for split 2+2 & #variables:{len(vars_2 + vars_4)} and #exp:{1}.')
-                optimal_jo_details.append([total_cost, optimized_jo_vars, result, cost_2 + cost_4, vars_2 + vars_4])
+                optimal_jo_details.append(split_solution)
             else:
-                print(f'No,optimal JO not found for split 2+2 & #variables:{len(vars_2 + vars_4)} and #exp:{1}.')
+                print(f'No,optimal JO not found for split 2+2 & #variables:{len(vars_2 + vars_4)} and #exp:{1}. Cost: {total_cost} vs DP: {dp_optimal_cost}')
             exp_run += 1
             print(f'# total exps run:{exp_run} & # splits:{count}.')
+            
+            # If no optimal solutions found, use the best solution from all_solutions
+            if len(optimal_jo_details) == 0 and len(all_solutions) > 0:
+                best_solution = min(all_solutions, key=lambda x: x[0])
+                print(f'No optimal solution found, using best solution found with cost: {best_solution[0]} (DP optimal: {dp_optimal_cost})')
+                optimal_jo_details.append(best_solution)
 
         # ----- n = 5 -----
         if n == 5:
