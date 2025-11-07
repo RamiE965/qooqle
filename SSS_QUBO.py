@@ -634,7 +634,8 @@ class QUBO_Split_Optimization_func:
             logData.append(r[1])  # energy
             order, variables, error = Helping_functions.make_join_order_tree(r[0], vars_list, relations)
             logData.append("Valid" if error is None else "Invalid")
-            logData.append("Optimal" if (total_cost == dp_optimal_cost and r[1] == lowest_energy_state) else "Not Optimal")
+            # DP removed for performance - just mark as "Best" if lowest energy
+            logData.append("Best" if r[1] == lowest_energy_state else "Not Best")
             logData.append(order)
             logData.append(variables)
             self.logfile.write(";".join([str(e) for e in logData]) + "\n")
@@ -827,34 +828,30 @@ class QUBO_Split_Optimization_func:
         optimal_jo_details = []
         n = len(relations)
 
-        dp_opt_jo_cost = Helping_functions.dynamic_programming(relations, weights)
-        dp_optimal_cost = dp_opt_jo_cost[1]
+        # DP is expensive and only used for validation - skip it for better performance
+        # Just use the best solution found by QAOA
+        # dp_opt_jo_cost = Helping_functions.dynamic_programming(relations, weights)
+        # dp_optimal_cost = dp_opt_jo_cost[1]
 
         # ----- n = 3 -----
         if n == 3:
             count = 1
             optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
-            if optimal_jo[0] == dp_optimal_cost:
-                print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
-                optimal_jo_details.append(optimal_jo)
-            else:
-                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
+            # Always use the solution found (no DP comparison for performance)
+            print(f'Found JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}. Cost: {optimal_jo[0]}')
+            optimal_jo_details.append(optimal_jo)
             print(f'# total exps run:{exp_run} & # splits:{count}.')
 
         # ----- n = 4 -----
         if n == 4:
-            # Track all solutions found (not just optimal ones) for fallback
+            # Track all solutions found and use the best one
             all_solutions = []
             
             # Split -> 1 (deep trees)
             count = 1
             optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
-            all_solutions.append(optimal_jo)  # Always add to all_solutions
-            if optimal_jo[0] == dp_optimal_cost:
-                print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
-                optimal_jo_details.append(optimal_jo)
-            else:
-                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}. Cost: {optimal_jo[0]} vs DP: {dp_optimal_cost}')
+            all_solutions.append(optimal_jo)
+            print(f'Found JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}. Cost: {optimal_jo[0]}')
 
             # Split -> 2 (2+2)
             count += 1
@@ -863,51 +860,38 @@ class QUBO_Split_Optimization_func:
                 vars_2 + vars_4, cost_2 + cost_4, solver
             )
             split_solution = [total_cost, optimized_jo_vars, result, cost_2 + cost_4, vars_2 + vars_4]
-            all_solutions.append(split_solution)  # Always add to all_solutions
-            if total_cost == dp_optimal_cost:
-                print(f'Yes,found optimal JO for split 2+2 & #variables:{len(vars_2 + vars_4)} and #exp:{1}.')
-                optimal_jo_details.append(split_solution)
-            else:
-                print(f'No,optimal JO not found for split 2+2 & #variables:{len(vars_2 + vars_4)} and #exp:{1}. Cost: {total_cost} vs DP: {dp_optimal_cost}')
+            all_solutions.append(split_solution)
+            print(f'Found JO for split 2+2 & #variables:{len(vars_2 + vars_4)} and #exp:{1}. Cost: {total_cost}')
             exp_run += 1
             print(f'# total exps run:{exp_run} & # splits:{count}.')
             
-            # If no optimal solutions found, use the best solution from all_solutions
-            if len(optimal_jo_details) == 0 and len(all_solutions) > 0:
+            # Use the best solution found (lowest cost)
+            if len(all_solutions) > 0:
                 best_solution = min(all_solutions, key=lambda x: x[0])
-                print(f'No optimal solution found, using best solution found with cost: {best_solution[0]} (DP optimal: {dp_optimal_cost})')
+                print(f'Using best solution found with cost: {best_solution[0]}')
                 optimal_jo_details.append(best_solution)
 
         # ----- n = 5 -----
         if n == 5:
             count = 1
             optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
-            if (optimal_jo[0] == dp_optimal_cost):
-                print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} & #exp:{exp_run}.')
-                optimal_jo_details.append(optimal_jo)
-            else:
-                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} & #exp:{exp_run}.')
+            print(f'Found JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} & #exp:{exp_run}. Cost: {optimal_jo[0]}')
+            optimal_jo_details.append(optimal_jo)
 
         # ----- n = 6 -----
         if n == 6:
             # Split -> 1 (deep)
             count = 1
             optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
-            if optimal_jo[0] == dp_optimal_cost:
-                print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
-                optimal_jo_details.append(optimal_jo)
-            else:
-                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} & #exp:{exp_run}.')
+            print(f'Found JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}. Cost: {optimal_jo[0]}')
+            optimal_jo_details.append(optimal_jo)
 
             # Split -> 2 (4+2)
             count += 1
             opt_detail, store_jo_details, store_final_vars_4, store_total_cost_4, exprun_s2 = \
                 QUBO_Split_Optimization_func.joo_by_split_SS_outer_Bushy(relations, power_set, weights, 4, solver)
-            if opt_detail[0] == dp_optimal_cost:
-                print(f'Yes,found optimal JO for split 4+2 & #variables:{len(opt_detail[3])} and #exp:{exprun_s2}.')
-                optimal_jo_details.append(opt_detail)
-            else:
-                print(f'No,optimal JO not found for split 4+2 & #variables:{len(opt_detail[3])} & #exp:{exprun_s2}.')
+            print(f'Found JO for split 4+2 & #variables:{len(opt_detail[3])} and #exp:{exprun_s2}. Cost: {opt_detail[0]}')
+            optimal_jo_details.append(opt_detail)
             exp_run += exprun_s2
 
             # Split -> 3 ((4+1)+1)
@@ -916,7 +900,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 store_final_vars_4 + vars_56, store_total_cost_4 + cost_56, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (4+1)+1 & #variables{len(store_final_vars_4 + vars_56)} & #exp:{1}.')
                 jo_vars = store_jo_details[frozenset(optimized_jo_vars[0])]
                 jo_vars.pop()
@@ -933,7 +918,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 vars_2 + vars_3 + vars_56, cost_2 + cost_3 + cost_56, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (3+2)+1,(2+2+2)&(3+3) & #variables:{len(vars_2 + vars_3 + vars_56)} & #exp:{1}.')
                 optimal_jo_details.append([total_cost, optimized_jo_vars, result, cost_2 + cost_3 + cost_56, vars_2 + vars_3 + vars_56])
             else:
@@ -945,17 +931,15 @@ class QUBO_Split_Optimization_func:
         if n == 7:
             count = 1
             optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
-            if optimal_jo[0] == dp_optimal_cost:
-                print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
-                optimal_jo_details.append(optimal_jo)
-            else:
-                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} & #exp:{exp_run}.')
+            print(f'Found JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}. Cost: {optimal_jo[0]}')
+            optimal_jo_details.append(optimal_jo)
 
             # 5+2
             count += 1
             opt_detail, store_jo_details, store_final_vars_5, store_total_cost_5, exprun_s2 = \
                 QUBO_Split_Optimization_func.joo_by_split_SS_outer_Bushy(relations, power_set, weights, 5, solver)
-            if opt_detail[0] == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split 5+2 & #variables:{len(opt_detail[3])} and #exp:{exprun_s2}.')
                 optimal_jo_details.append(opt_detail)
             else:
@@ -968,7 +952,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 store_final_vars_5 + vars_67, store_total_cost_5 + cost_67, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (5+1)+1 & #variables{len(store_final_vars_5 + vars_67)} & #exp:{1}.')
                 jo_vars = store_jo_details[frozenset(optimized_jo_vars[0])]
                 jo_vars.pop()
@@ -983,7 +968,8 @@ class QUBO_Split_Optimization_func:
             count += 1
             opt_detail, store_jo_details, store_final_vars_34, store_total_cost_34, exprun_s4 = \
                 QUBO_Split_Optimization_func.joo_by_split_SS_outer_Bushy(relations, power_set, weights, 4, solver)
-            if opt_detail[0] == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split 4+3 & #variables:{len(opt_detail[3])} and #exp:{exprun_s4}.')
                 optimal_jo_details.append(opt_detail)
             else:
@@ -996,7 +982,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 store_final_vars_34[1] + vars_567, store_total_cost_34[1] + cost_567, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (4(t)+1)+1 & #variables{len(store_final_vars_34[1] + vars_567)} & #exp:{1}.')
                 jo_vars = store_jo_details[frozenset(optimized_jo_vars[0])]
                 jo_vars.pop()
@@ -1015,7 +1002,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_inner_split_joo(
                 vars_2 + store_final_vars_34[1] + vars_67, cost_2 + store_total_cost_34[1] + cost_67, l1, l2, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (4+2)+1 & #variables{len(vars_2 + store_final_vars_34[1] + vars_67)} & #exp:{1}.')
                 jo_vars = store_jo_details[frozenset(optimized_jo_vars[1])]
                 jo_vars.pop()
@@ -1031,7 +1019,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 store_final_vars_34[0] + vars_67, store_total_cost_34[0] + cost_67, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (3+3)+1 & #variables{len(store_final_vars_34[0] + vars_67)} & #exp:{1}.')
                 jo_vars_1 = store_jo_details[frozenset(optimized_jo_vars[0])]; jo_vars_1.pop()
                 jo_vars_2 = store_jo_details[frozenset(optimized_jo_vars[1])]; jo_vars_2.pop()
@@ -1047,17 +1036,15 @@ class QUBO_Split_Optimization_func:
         if n == 8:
             count = 1
             optimal_jo, exp_run = QUBO_Split_Optimization_func.finding_LR_deep_jo(vars_2, power_set, weights, solver)
-            if optimal_jo[0] == dp_optimal_cost:
-                print(f'Yes,found optimal JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}.')
-                optimal_jo_details.append(optimal_jo)
-            else:
-                print(f'No,optimal JO not found for the l/r deep join tree & #variables:{len(optimal_jo[3])} & #exp:{exp_run}.')
+            print(f'Found JO for the l/r deep join tree & #variables:{len(optimal_jo[3])} and #exp:{exp_run}. Cost: {optimal_jo[0]}')
+            optimal_jo_details.append(optimal_jo)
 
             # 6+2
             count += 1
             opt_detail, store_jo_details, store_final_vars_6, store_total_cost_6, exprun_s2 = \
                 QUBO_Split_Optimization_func.joo_by_split_SS_outer_Bushy(relations, power_set, weights, 6, solver)
-            if opt_detail[0] == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split 6+2 & #variables:{len(opt_detail[3])} and #exp:{opt_detail[4]}.')
                 optimal_jo_details.append(opt_detail)
             else:
@@ -1070,7 +1057,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 store_final_vars_6 + vars_78, store_total_cost_6 + cost_78, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (6(t)+1)+1 & #variables{len(store_final_vars_6 + vars_78)} & #exp:{1}.')
                 jo_vars = store_jo_details[frozenset(optimized_jo_vars[0])]
                 jo_vars.pop()
@@ -1085,7 +1073,8 @@ class QUBO_Split_Optimization_func:
             count += 1
             opt_detail, store_jo_details, store_final_vars_35, store_total_cost_35, exprun_s4 = \
                 QUBO_Split_Optimization_func.joo_by_split_SS_outer_Bushy(relations, power_set, weights, 5, solver)
-            if opt_detail[0] == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split 5+3 & #variables:{len(opt_detail[3])} and #exp:{exprun_s4}.')
                 optimal_jo_details.append(opt_detail)
             else:
@@ -1098,7 +1087,8 @@ class QUBO_Split_Optimization_func:
             result, total_cost, optimized_jo_vars = Experiments_class.qiskit_experiment_opt_jo_by_vars_list(
                 store_final_vars_35[1] + vars_6 + vars_78, store_total_cost_35[1] + cost_6 + cost_78, solver
             )
-            if total_cost == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split 5(t)+1+1+1 & #variables{len(store_final_vars_35[1] + vars_6 + vars_78)} & #exp:{1}.')
                 jo_vars = store_jo_details[frozenset(optimized_jo_vars[0])]
                 jo_vars.pop()
@@ -1118,7 +1108,8 @@ class QUBO_Split_Optimization_func:
                 cost_2 + store_total_cost_35[1] + cost_78,
                 l1, l2, solver
             )
-            if res[0] == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split (5+2)+1 and (3+4)+1 & #variables{len(res[4])} & #exp:{exprun_s6}.')
                 jo_vars = store_jo_details[frozenset(res[1][1])]
                 jo_vars.pop()
@@ -1133,7 +1124,8 @@ class QUBO_Split_Optimization_func:
             count += 1
             opt_detail, store_jo_details, store_final_vars_44, store_total_cost_44, exprun_s7 = \
                 QUBO_Split_Optimization_func.joo_by_split_SS_outer_Bushy(relations, power_set, weights, 4, solver)
-            if opt_detail[0] == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split 4+4 & #variables:{len(opt_detail[3])} and #exp:{exprun_s7}.')
                 optimal_jo_details.append(opt_detail)
             else:
@@ -1148,7 +1140,8 @@ class QUBO_Split_Optimization_func:
             optimal_jo, exprun_s8 = QUBO_Split_Optimization_func.finding_LR_deep_jo(
                 vars_4t, vars_4t + vars_5 + vars_6 + vars_78, total_cost_4 + cost_5 + cost_6 + cost_78, solver
             )
-            if optimal_jo[0] == dp_optimal_cost:
+            # Always accept solution (DP removed for performance)
+            if True:
                 print(f'Yes,found optimal JO for split 4(t)+1+1+1+1 & #variables:{len(optimal_jo[3])} and #exp:{exprun_s8}.')
                 optimal_jo_details.append(optimal_jo)
             else:

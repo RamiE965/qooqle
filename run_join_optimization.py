@@ -24,7 +24,7 @@ except ImportError:
     PLOTTING_ENABLED = False
     print("\nWarning: matplotlib not found. Plotting will be disabled. To enable, run: pip install matplotlib")
 
-def parse_estimated_cardinality(s):
+def parse_cardinality(s):
     """Parses cardinality strings like '100', '10.5k', '2.1M', '1e+6'."""
     s = str(s).lower().strip()
     if not s: return 0
@@ -47,7 +47,7 @@ def parse_estimated_cardinality(s):
     try:
         return int(float(s_num) * multiplier)
     except ValueError:
-        print(f"Warning: Could not parse est. cardinality string '{s}'")
+        print(f"Warning: Could not parse cardinality string '{s}'")
         return 0
 
 def parse_row_cardinality(s):
@@ -119,10 +119,25 @@ def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
     config = scenarios.get(scenario, scenarios['default'])
     
     # Generate data with varying sizes based on scenario
+    # Regions (for 5+ table joins)
+    num_regions = 5
+    regions_df = pd.DataFrame({
+        'r_regionkey': range(num_regions),
+        'r_name': [f'REGION_{i}' for i in range(num_regions)],
+        'r_comment': [f'Comment for region {i}' for i in range(num_regions)]
+    })
+    
     nations_df = pd.DataFrame({
         'n_nationkey': range(config['nations']), 
         'n_name': [f'NATION_{i}' for i in range(config['nations'])], 
-        'n_regionkey': np.random.randint(0, 5, size=config['nations'])
+        'n_regionkey': np.random.randint(0, num_regions, size=config['nations'])
+    })
+    
+    num_suppliers = int(1000 * scale_factor)
+    suppliers_df = pd.DataFrame({
+        's_suppkey': range(num_suppliers),
+        's_name': [f'Supplier#{i}' for i in range(num_suppliers)],
+        's_nationkey': np.random.randint(0, config['nations'], size=num_suppliers)
     })
     
     num_customers = int(15000 * scale_factor * config['customers_mult'])
@@ -142,6 +157,7 @@ def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
     num_lineitems = int(600000 * scale_factor * config['lineitems_mult'])
     lineitems_df = pd.DataFrame({
         'l_orderkey': np.random.randint(0, num_orders, size=num_lineitems), 
+        'l_suppkey': np.random.randint(0, num_suppliers, size=num_lineitems),
         'l_extendedprice': np.random.uniform(50, 2000, size=num_lineitems)
     })
     
@@ -152,13 +168,31 @@ def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
         cur.execute("DROP TABLE IF EXISTS lineitem CASCADE;")
         cur.execute("DROP TABLE IF EXISTS orders CASCADE;")
         cur.execute("DROP TABLE IF EXISTS customer CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS supplier CASCADE;")
         cur.execute("DROP TABLE IF EXISTS nation CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS region CASCADE;")
+        
+        cur.execute("""
+            CREATE TABLE region (
+                r_regionkey INTEGER PRIMARY KEY,
+                r_name VARCHAR,
+                r_comment VARCHAR
+            );
+        """)
         
         cur.execute("""
             CREATE TABLE nation (
                 n_nationkey INTEGER PRIMARY KEY,
                 n_name VARCHAR,
                 n_regionkey INTEGER
+            );
+        """)
+        
+        cur.execute("""
+            CREATE TABLE supplier (
+                s_suppkey INTEGER PRIMARY KEY,
+                s_name VARCHAR,
+                s_nationkey INTEGER
             );
         """)
         
@@ -181,6 +215,7 @@ def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
         cur.execute("""
             CREATE TABLE lineitem (
                 l_orderkey INTEGER,
+                l_suppkey INTEGER,
                 l_extendedprice DECIMAL(10, 2)
             );
         """)
@@ -197,8 +232,16 @@ def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
             )
         
         execute_values(cur, """
+            INSERT INTO region (r_regionkey, r_name, r_comment) VALUES %s
+        """, [convert_to_python_types(row) for row in regions_df.values])
+        
+        execute_values(cur, """
             INSERT INTO nation (n_nationkey, n_name, n_regionkey) VALUES %s
         """, [convert_to_python_types(row) for row in nations_df.values])
+        
+        execute_values(cur, """
+            INSERT INTO supplier (s_suppkey, s_name, s_nationkey) VALUES %s
+        """, [convert_to_python_types(row) for row in suppliers_df.values])
         
         execute_values(cur, """
             INSERT INTO customer (c_custkey, c_name, c_nationkey) VALUES %s
@@ -209,43 +252,20 @@ def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
         """, [convert_to_python_types(row) for row in orders_df.values])
         
         execute_values(cur, """
-            INSERT INTO lineitem (l_orderkey, l_extendedprice) VALUES %s
+            INSERT INTO lineitem (l_orderkey, l_suppkey, l_extendedprice) VALUES %s
         """, [convert_to_python_types(row) for row in lineitems_df.values])
         
         # Create indexes for better join performance
         cur.execute("CREATE INDEX idx_orders_custkey ON orders(o_custkey);")
         cur.execute("CREATE INDEX idx_lineitem_orderkey ON lineitem(l_orderkey);")
+        cur.execute("CREATE INDEX idx_lineitem_suppkey ON lineitem(l_suppkey);")
         cur.execute("CREATE INDEX idx_customer_nationkey ON customer(c_nationkey);")
+        cur.execute("CREATE INDEX idx_supplier_nationkey ON supplier(s_nationkey);")
+        cur.execute("CREATE INDEX idx_nation_regionkey ON nation(n_regionkey);")
         
         connection.commit()
         
     print("--- Database setup complete. ---\n")
-
-def parse_cardinality(s):
-    """Parses cardinality strings like '100', '10.5k', '2.1M', '1e+6'."""
-    s = str(s).lower().strip()
-    if not s: return 0
-    
-    if 'e+' in s:
-        return int(float(s))
-        
-    s_num = s
-    multiplier = 1
-    if s.endswith('k'):
-        multiplier = 1000
-        s_num = s[:-1]
-    elif s.endswith('m'):
-        multiplier = 1000000
-        s_num = s[:-1]
-    elif s.endswith('b') or s.endswith('g'): # b for billion, g for giga
-        multiplier = 1000000000
-        s_num = s[:-1]
-        
-    try:
-        return int(float(s_num) * multiplier)
-    except ValueError:
-        print(f"Warning: Could not parse cardinality string '{s}'")
-        return 0
 
 def get_join_costs_random(relations, seed=None):
     """
@@ -345,27 +365,20 @@ def get_join_costs_simple(conn, relations_map, relations, join_conditions):
                 cost = size1 * size2
                 print(f"  {combo}: {size1} × {size2} = {cost} (cross product)")
         else:
-            # Multi-table join: estimate as sum of pairwise joins
-            # This is a simplification - the paper uses more sophisticated DP-based costs
-            # but this gives reasonable relative costs without using PostgreSQL
-            cost = 0
-            combo_set = set(combo)
+            # Multi-table join: sum the valid pairwise join costs
+            # A join tree never does N-way Cartesian products - it's a series of pairwise joins
+            # So we estimate as the sum of valid (connected) pairwise joins
+            pairwise_costs = []
+            for i in range(len(combo)):
+                for j in range(i+1, len(combo)):
+                    key = frozenset([combo[i], combo[j]])
+                    if key in join_conditions:  # Only include valid joins with join conditions
+                        pairwise_cost = costs_map.get(key, 0)
+                        if pairwise_cost > 0 and pairwise_cost < 9000000000:  # Exclude cross products
+                            pairwise_costs.append(pairwise_cost)
             
-            # For each table in the combo, estimate the cost of joining it
-            # Cost ≈ product of all table sizes with selectivity adjustment
-            base_cost = 1
-            for rel in combo:
-                base_cost *= table_sizes[rel]
-            
-            # Apply selectivity: assume each join reduces by a factor
-            # More joins = more selectivity reduction
-            num_joins = len(combo) - 1
-            # Conservative selectivity: each join reduces by 1/average_table_size
-            avg_size = sum(table_sizes[r] for r in combo) / len(combo)
-            selectivity = (1.0 / avg_size) ** (num_joins - 1)  # Compound selectivity
-            
-            cost = int(base_cost * selectivity)
-            print(f"  {combo}: {base_cost} × {selectivity:.6f} = {cost}")
+            cost = sum(pairwise_costs) if pairwise_costs else 1000
+            print(f"  {combo}: {cost} (sum of {len(pairwise_costs)} valid pairwise joins)")
         
         costs_map[frozenset(combo)] = cost
         weights.append(cost)
@@ -375,181 +388,350 @@ def get_join_costs_simple(conn, relations_map, relations, join_conditions):
     return costs_map, weights
 
 
-def calculate_tree_cost(tree, costs_map):
-    """Recursively calculates the total estimated cost of a join tree."""
+def get_join_costs_postgres(conn, relations_map, relations, join_conditions, query_parts):
+    """
+    Calculate join costs by asking PostgreSQL to estimate the cost of each possible join.
+    This uses PostgreSQL's sophisticated cost model (I/O, CPU, indexes, statistics)
+    to provide accurate weights for QAOA optimization.
+    
+    WHY THIS IS INTERESTING:
+    - QAOA now optimizes using the SAME cost model as PostgreSQL
+    - We can compare QAOA's optimization algorithm vs PostgreSQL's dynamic programming
+    - If QAOA still loses, it's the optimization algorithm, not the cost model
+    - If QAOA wins, it found a better join order than PostgreSQL's greedy search!
+    
+    For each possible join subset, we construct a query with that specific join order
+    and use EXPLAIN to get PostgreSQL's cost estimate without executing the query.
+    """
+    print("--- Calculating join costs (PostgreSQL EXPLAIN estimates) ---")
+    
+    costs_map = {}
+    weights = []
+    sublists = QUBO_formulation.relation_sublists(relations)
+    
+    print("\nQuerying PostgreSQL for join cost estimates:")
+    
+    with conn.cursor() as cur:
+        for combo in sublists:
+            if len(combo) < 2:
+                continue
+            
+            # For multi-table joins (3+), skip PostgreSQL estimation since costs are tree-structure dependent
+            # Use sum of valid (non-cross-product) pairwise join costs as estimate
+            # This represents the cost if we did all valid joins sequentially
+            if len(combo) > 2:
+                # Sum only valid join costs (those with join conditions)
+                pairwise_costs = []
+                for i in range(len(combo)):
+                    for j in range(i+1, len(combo)):
+                        key = frozenset([combo[i], combo[j]])
+                        if key in join_conditions:  # Only include valid joins
+                            cost = costs_map.get(key, 1000)
+                            if cost < 999999999:  # Exclude penalty costs
+                                pairwise_costs.append(cost)
+                
+                cost = sum(pairwise_costs) if pairwise_costs else 1000
+                costs_map[frozenset(combo)] = cost
+                weights.append(cost)
+                print(f"  {combo}: {cost} (sum of valid pairwise joins)")
+                continue
+            
+            try:
+                # Use savepoint for each query so failures don't abort the whole transaction
+                cur.execute("SAVEPOINT cost_estimate;")
+                
+                # Temporarily set join settings to allow estimation
+                cur.execute("SET LOCAL join_collapse_limit = 1;")
+                cur.execute("SET LOCAL from_collapse_limit = 1;")
+                cur.execute("SET LOCAL geqo = off;")
+                # Build a simple query that performs this specific join
+                if len(combo) == 2:
+                    # Two-table join
+                    r1, r2 = combo[0], combo[1]
+                    t1, t2 = relations_map[r1], relations_map[r2]
+                    
+                    # Find join condition
+                    key = frozenset([r1, r2])
+                    if key in join_conditions:
+                        join_cond = join_conditions[key]
+                        test_query = f"SELECT * FROM {t1} AS {r1} JOIN {t2} AS {r2} ON {join_cond}"
+                    else:
+                        # No join condition = cross product. Use penalty cost to avoid these
+                        print(f"  {combo}: 999999999 (cross product penalty - no join condition)")
+                        costs_map[frozenset(combo)] = 999999999
+                        weights.append(999999999)
+                        cur.execute("RELEASE SAVEPOINT cost_estimate;")
+                        continue
+                
+                # Add WHERE clause if present (for filtering)
+                if 'where' in query_parts:
+                    test_query += f" {query_parts['where']}"
+                
+                # Use EXPLAIN to get cost estimate
+                cur.execute(f"EXPLAIN {test_query}")
+                explain_output = "\n".join([row[0] for row in cur.fetchall()])
+                
+                # Extract cost from EXPLAIN output
+                cost_match = re.search(r'cost=[\d.]+\.\.([\d.]+)', explain_output)
+                if cost_match:
+                    cost = int(float(cost_match.group(1)))
+                    costs_map[frozenset(combo)] = cost
+                    weights.append(cost)
+                    print(f"  {combo}: {cost}")
+                    cur.execute("RELEASE SAVEPOINT cost_estimate;")
+                else:
+                    print(f"  {combo}: Could not parse cost, using fallback")
+                    # Fallback to simple estimate
+                    cost = 1000 * len(combo)
+                    costs_map[frozenset(combo)] = cost
+                    weights.append(cost)
+                    cur.execute("ROLLBACK TO SAVEPOINT cost_estimate;")
+                    
+            except Exception as e:
+                print(f"  {combo}: Error estimating cost ({e}), using fallback")
+                # Rollback to savepoint to continue with other queries
+                cur.execute("ROLLBACK TO SAVEPOINT cost_estimate;")
+                # Fallback to simple estimate
+                cost = 1000 * len(combo)
+                costs_map[frozenset(combo)] = cost
+                weights.append(cost)
+        
+        # Commit to clear any remaining savepoints
+        conn.commit()
+    
+    print(f"\nCalculated {len(weights)} join costs using PostgreSQL EXPLAIN")
+    print("--- Cost calculation complete. ---\n")
+    return costs_map, weights
+
+
+def calculate_tree_cost(tree, costs_map, join_conditions=None):
+    """
+    Recursively calculates the total estimated cost of a join tree.
+    If join_conditions is provided, validates that each join has a valid path.
+    """
     if isinstance(tree, str):
         return 0
 
     left_subtree, right_subtree = tree[0], tree[1]
-    cost = calculate_tree_cost(left_subtree, costs_map) + calculate_tree_cost(right_subtree, costs_map)
+    cost = calculate_tree_cost(left_subtree, costs_map, join_conditions) + calculate_tree_cost(right_subtree, costs_map, join_conditions)
     
     def get_relations(subtree):
         if isinstance(subtree, str): return {subtree}
         return get_relations(subtree[0]).union(get_relations(subtree[1]))
 
-    key = frozenset(get_relations(tree))
-    cost += costs_map.get(key, 0)
+    left_relations = get_relations(left_subtree)
+    right_relations = get_relations(right_subtree)
+    all_relations = left_relations.union(right_relations)
+    
+    # Check if there's a valid join path between left and right subtrees
+    if join_conditions is not None:
+        has_direct_join = False
+        for l in left_relations:
+            for r in right_relations:
+                if frozenset([l, r]) in join_conditions:
+                    has_direct_join = True
+                    break
+            if has_direct_join:
+                break
+        
+        # If no direct join condition, this is a cross product - use massive penalty
+        if not has_direct_join:
+            # Use the cross product penalty (should be 9 billion range)
+            cross_product_cost = 999999999999  # Massive penalty to avoid this plan
+            print(f"  [CROSS PRODUCT DETECTED] No join condition between {left_relations} and {right_relations} → cost: {cross_product_cost:,}")
+            cost += cross_product_cost
+            return cost
+    
+    key = frozenset(all_relations)
+    join_cost = costs_map.get(key, 0)
+    cost += join_cost
     return cost
+
+def parse_postgres_join_tree(explain_output, relations_map):
+    """
+    Parse PostgreSQL's join tree structure from EXPLAIN output and convert to our tree format.
+    Returns a tree structure compatible with calculate_tree_cost.
+    """
+    try:
+        # Find all table scans with their aliases
+        table_pattern = r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan|Parallel Seq Scan).*?on\s+(\w+)\s+(\w+)'
+        matches = re.findall(table_pattern, explain_output, re.IGNORECASE)
+        
+        # Create reverse mapping: table_name -> alias
+        table_to_alias = {table: alias for table, alias in matches}
+        
+        # For simple left-deep trees, just return the scan order
+        # This is a simplified parser - real implementation would need full tree parsing
+        scan_order = []
+        for line in explain_output.split('\n'):
+            scan_match = re.search(r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan|Parallel Seq Scan).*?on\s+(\w+)\s+(\w+)', line, re.IGNORECASE)
+            if scan_match:
+                table_name, alias = scan_match.groups()
+                if alias not in scan_order:
+                    scan_order.append(alias)
+        
+        # Build left-deep tree from scan order
+        if len(scan_order) < 2:
+            return None
+        
+        tree = [scan_order[0], scan_order[1]]
+        for i in range(2, len(scan_order)):
+            tree = [tree, scan_order[i]]
+        
+        return tree
+    except Exception as e:
+        print(f"Warning: Could not parse join tree: {e}")
+        return None
 
 def parse_join_order_from_postgres(explain_output):
     """
     Parse join order from PostgreSQL EXPLAIN output.
     PostgreSQL's EXPLAIN shows join order in the plan tree structure.
+    We need to parse the nested structure to determine the actual join order.
     """
     try:
-        # Extract table names from the plan
-        # Look for patterns like "Seq Scan on customer c" or "Index Scan using..."
+        # Extract all table scans with their aliases
+        # Look for patterns like "Seq Scan on customer c" or "Index Scan using idx_orders_custkey on orders o"
         table_pattern = r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan).*?on\s+(\w+)\s+(\w+)'
         matches = re.findall(table_pattern, explain_output, re.IGNORECASE)
         
-        # Also look for join conditions to infer order
-        join_pattern = r'(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)'
-        join_matches = re.findall(join_pattern, explain_output)
+        # Create a mapping of alias to table name
+        alias_to_table = {alias: table for table, alias in matches}
+        all_aliases = set(alias_to_table.keys())
         
-        # Build order from joins
+        # Extract join conditions to understand relationships
+        # Pattern: "Hash Cond: (c.c_nationkey = n.n_nationkey)" or "Index Cond: (o_custkey = c.c_custkey)"
+        join_pattern = r'(?:Hash Cond|Index Cond|Join Filter):\s*\(?(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)\)?'
+        join_matches = re.findall(join_pattern, explain_output, re.IGNORECASE)
+        
+        # Build a graph of join relationships (which tables join to which)
+        join_graph = {}
+        for t1, col1, t2, col2 in join_matches:
+            if t1 in all_aliases and t2 in all_aliases:
+                if t1 not in join_graph:
+                    join_graph[t1] = []
+                if t2 not in join_graph:
+                    join_graph[t2] = []
+                join_graph[t1].append(t2)
+                join_graph[t2].append(t1)
+        
+        # Parse the plan structure by analyzing indentation and join types
+        # PostgreSQL plans are tree-structured: outer -> inner in nested loops
+        lines = explain_output.split('\n')
+        
+        # Find all table scans in order of appearance (depth-first traversal)
+        # This gives us the order they appear in the plan tree
+        scan_order = []
+        for line in lines:
+            # Look for table scans
+            scan_match = re.search(r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan).*?on\s+(\w+)\s+(\w+)', line, re.IGNORECASE)
+            if scan_match:
+                table_name, alias = scan_match.groups()
+                if alias not in scan_order:
+                    scan_order.append(alias)
+        
+        # Build join order by following the join relationships
+        # Start with the first table in scan order
         order = []
         seen = set()
         
-        # First, collect all tables mentioned
-        all_tables = set()
-        for table_name, alias in matches:
-            all_tables.add(alias)
+        if scan_order:
+            # Start with the first table
+            order.append(scan_order[0])
+            seen.add(scan_order[0])
+            
+            # Build order by following join relationships
+            # For each remaining table, find which already-seen table it joins to
+            remaining = [a for a in scan_order[1:] if a not in seen]
+            
+            while remaining:
+                added_any = False
+                for alias in remaining[:]:  # Copy list to iterate safely
+                    # Find which already-seen table this joins to
+                    for seen_alias in seen:
+                        if seen_alias in join_graph and alias in join_graph.get(seen_alias, []):
+                            order.append(alias)
+                            seen.add(alias)
+                            remaining.remove(alias)
+                            added_any = True
+                            break
+                    
+                    if not added_any:
+                        # If no join found, check if it's a direct join condition
+                        # Sometimes the join condition shows the relationship
+                        for t1, col1, t2, col2 in join_matches:
+                            if t1 == alias and t2 in seen:
+                                order.append(alias)
+                                seen.add(alias)
+                                if alias in remaining:
+                                    remaining.remove(alias)
+                                added_any = True
+                                break
+                            elif t2 == alias and t1 in seen:
+                                order.append(alias)
+                                seen.add(alias)
+                                if alias in remaining:
+                                    remaining.remove(alias)
+                                added_any = True
+                                break
+                
+                # If we couldn't add any more, just add remaining tables in order
+                if not added_any and remaining:
+                    for alias in remaining:
+                        order.append(alias)
+                        seen.add(alias)
+                    break
         
-        # Try to build order from join conditions
-        for t1, col1, t2, col2 in join_matches:
-            if t1 not in seen and t2 not in seen:
-                order.extend([t1, t2])
-                seen.update([t1, t2])
-            elif t1 in seen and t2 not in seen:
-                order.append(t2)
-                seen.add(t2)
-            elif t2 in seen and t1 not in seen:
-                order.append(t1)
-                seen.add(t1)
-        
-        # If we couldn't determine from joins, use table scan order
-        if not order:
-            for table_name, alias in matches:
-                if alias not in order:
-                    order.append(alias)
+        # Fallback: if we couldn't build order, use scan order
+        if not order and scan_order:
+            order = scan_order
         
         return " -> ".join(order) if order else "Could not determine join order."
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return f"An error occurred parsing join order: {e}"
 
 def get_cost_from_postgres_explain(explain_output):
     """
-    Extract cost from PostgreSQL EXPLAIN output.
+    Extract total cost from PostgreSQL EXPLAIN output.
     PostgreSQL shows costs as "cost=0.00..123.45 rows=1000"
     
     COST CALCULATION METHOD:
-    - We extract the 'rows' estimate from the root node (final result cardinality)
-    - This represents the estimated number of rows in the final result
-    - This is used as a cost metric for comparison (similar to how DuckDB uses cardinality)
-    - Note: PostgreSQL also has a 'cost' value (in arbitrary units), but we use rows for consistency
+    - We extract the TOTAL COST (second number) from the root node
+    - This represents the total cost including ALL intermediate join operations
+    - This is the proper cost metric for comparison (not just final row count)
+    - PostgreSQL's cost units are arbitrary (based on I/O, CPU, etc.)
+    - We use this to compare with QAOA's total tree cost (sum of all join operations)
     
-    Returns: Estimated row count (as integer) or -1 if parsing fails
+    Returns: Total cost (as float) or -1 if parsing fails
     """
     try:
-        # Find the root node's cost (last cost in the plan)
+        # Find the root node's cost (first cost in the plan - the Limit node)
         # Pattern: "cost=0.00..123.45 rows=1000"
         cost_pattern = r'cost=([\d.]+)\.\.([\d.]+)\s+rows=(\d+)'
         matches = re.findall(cost_pattern, explain_output)
         
         if matches:
-            # Get the last (root) node's cost
-            last_match = matches[-1]
-            total_cost = float(last_match[1])  # Second number is total cost
-            rows = int(last_match[2])
-            print(f"[DEBUG] PostgreSQL cost: {total_cost}, rows: {rows}")
-            return int(rows)  # Return rows as cost metric (similar to DuckDB)
+            # Get the FIRST (root) node's cost - the Limit node is at the top
+            # The root node is the first match, not the last
+            root_match = matches[0]
+            startup_cost = float(root_match[0])  # First number is startup cost
+            total_cost = float(root_match[1])  # Second number is total cost (includes all operations)
+            rows = int(root_match[2])
+            print(f"[DEBUG] PostgreSQL root node: startup_cost={startup_cost}, total_cost={total_cost}, rows={rows}")
+            return total_cost  # Return total cost (includes all intermediate joins)
         
         return -1
     except Exception as e:
         print(f"Warning: Could not parse PostgreSQL cost: {e}")
         return -1
 
-def build_from_clause_flat(tree, relations_map, join_conditions, reverse_qaoa=False, experimental_lr_hybrid=False):
+def build_from_clause_forced(tree, relations_map, join_conditions, reverse_qaoa=False):
     """
-    Build a FROM clause from join tree for PostgreSQL.
-    PostgreSQL requires nested parentheses to force join order.
-    Use join_collapse_limit=1 to prevent reordering.
-    
-    Parameters:
-    - experimental_lr_hybrid: If True, read join structure right-to-left BUT table pairs left-to-right
-      Example: Tree ['l', ['o', 'c']] normally gives: c->o->l
-               With hybrid: o->c->l (reversed pairs)
-    """
-    # Extract join order from tree
-    def extract_join_order(t, reverse=False, hybrid=False):
-        """Extract the join order as a list of table aliases."""
-        if isinstance(t, str):
-            return [t]
-        
-        if reverse:
-            if hybrid:
-                # EXPERIMENTAL: Process structure right-to-left, but reverse ONLY immediate pairs
-                # Tree ['l', ['o', 'c']] becomes: ['o', 'c'] then 'l'
-                # Then reverse ONLY if it's a direct pair: [c, o] → [o, c]
-                # Final order: o, c, l (instead of c, o, l)
-                left_order = extract_join_order(t[0], reverse, hybrid)
-                right_order = extract_join_order(t[1], reverse, hybrid)
-                
-                # Only reverse if right_order is EXACTLY 2 elements (a direct pair)
-                # This prevents breaking larger join graphs
-                if len(right_order) == 2:
-                    return right_order[::-1] + left_order
-                else:
-                    # For larger subtrees, just concatenate normally (right then left)
-                    return right_order + left_order
-            else:
-                # Original: right-to-left, so process right first, then left
-                return extract_join_order(t[1], reverse, hybrid) + extract_join_order(t[0], reverse, hybrid)
-        else:
-            # Normal: left-to-right
-            return extract_join_order(t[0], reverse, hybrid) + extract_join_order(t[1], reverse, hybrid)
-    
-    # Get the join order
-    join_order = extract_join_order(tree, reverse_qaoa, experimental_lr_hybrid)
-    
-    print(f"[DEBUG] Extracted join order: {join_order} (reverse_qaoa={reverse_qaoa}, hybrid={experimental_lr_hybrid})")
-    
-    if len(join_order) == 0:
-        raise ValueError("Empty join order")
-    
-    # Build flat FROM clause: start with first table
-    first_table = join_order[0]
-    from_clause = f"{relations_map[first_table]} AS {first_table}"
-    joined_tables = {first_table}
-    all_relations = {first_table}
-    
-    # Add remaining tables in order
-    for table in join_order[1:]:
-        # Find join condition with any already-joined table
-        on_clause = None
-        for joined in joined_tables:
-            key = frozenset([table, joined])
-            if key in join_conditions:
-                on_clause = join_conditions[key]
-                break
-        
-        if on_clause:
-            from_clause += f" JOIN {relations_map[table]} AS {table} ON {on_clause}"
-        else:
-            # No direct condition found - cross join
-            from_clause += f" CROSS JOIN {relations_map[table]} AS {table}"
-            print(f"Warning: No direct join condition found for {table}")
-        
-        joined_tables.add(table)
-        all_relations.add(table)
-    
-    return from_clause, all_relations
-
-
-def build_from_clause_recursively(tree, relations_map, join_conditions, reverse_qaoa=False):
-    """
-    Build FROM clause from join tree using nested parentheses for PostgreSQL.
-    PostgreSQL respects nested parentheses when join_collapse_limit=1.
+    Build FROM clause using nested parentheses to force join order.
+    With join_collapse_limit=1, from_collapse_limit=1, and geqo=off,
+    PostgreSQL will respect the join order specified by explicit JOIN syntax.
     If reverse_qaoa=True, treats the tree as QAOA output which is read right-to-left.
     """
     if isinstance(tree, str): 
@@ -563,8 +745,8 @@ def build_from_clause_recursively(tree, relations_map, join_conditions, reverse_
     else:
         left_tree, right_tree = tree[0], tree[1]  # Normal order
         
-    left_sql, left_relations = build_from_clause_recursively(left_tree, relations_map, join_conditions, reverse_qaoa)
-    right_sql, right_relations = build_from_clause_recursively(right_tree, relations_map, join_conditions, reverse_qaoa)
+    left_sql, left_relations = build_from_clause_forced(left_tree, relations_map, join_conditions, reverse_qaoa)
+    right_sql, right_relations = build_from_clause_forced(right_tree, relations_map, join_conditions, reverse_qaoa)
     
     # Find join condition between the two relation sets
     on_clause = None
@@ -580,7 +762,9 @@ def build_from_clause_recursively(tree, relations_map, join_conditions, reverse_
     join_type, join_sql = ("JOIN", f"ON {on_clause}") if on_clause else ("CROSS JOIN", "")
     if not on_clause: 
         print(f"Warning: No direct join condition between {left_relations} and {right_relations}. Using CROSS JOIN.")
-        
+    
+    # Use nested parentheses to force join order
+    # With join_collapse_limit=1, PostgreSQL will process joins left-to-right as specified
     return f"({left_sql} {join_type} {right_sql} {join_sql})", left_relations.union(right_relations)
 
 def run_benchmark(num_tables, relations_map, relations, join_conditions, query_parts, postgres_conn, weight_method='cardinality', run_seed=None):
@@ -611,6 +795,9 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
         postgres_order = parse_join_order_from_postgres(explain_output)
         postgres_cost = get_cost_from_postgres_explain(explain_output)
         
+        # Also parse PostgreSQL's tree structure for pairwise cost comparison
+        postgres_tree = parse_postgres_join_tree(explain_output, relations_map)
+        
         # Execute query for timing (separate from EXPLAIN ANALYZE to get pure execution time)
         # Run multiple times and take average to reduce variance
         print("Executing PostgreSQL with its optimized plan (3 runs for average)...")
@@ -629,8 +816,23 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
     # Generate weights based on chosen method
     if weight_method == 'random':
         costs_map, weights = get_join_costs_random(relations, seed=run_seed)
+    elif weight_method == 'postgres':
+        costs_map, weights = get_join_costs_postgres(postgres_conn, relations_map, relations, join_conditions, query_parts)
     else:  # cardinality
         costs_map, weights = get_join_costs_simple(postgres_conn, relations_map, relations, join_conditions)
+    
+    # Use the same cost model for comparing both plans (consistent metric)
+    # The costs_map from above already contains the selected weight_method
+    comparison_costs_map = costs_map
+    cost_model_name = {'postgres': 'PostgreSQL Estimates', 'cardinality': 'Cardinality', 'random': 'Random'}[weight_method]
+    
+    postgres_tree_cost_comparison = None
+    if postgres_tree:
+        try:
+            postgres_tree_cost_comparison = calculate_tree_cost(postgres_tree, comparison_costs_map, join_conditions)
+            print(f"[DEBUG] PostgreSQL's tree using {weight_method} model: {postgres_tree} → cost: {postgres_tree_cost_comparison}")
+        except Exception as e:
+            print(f"[DEBUG] Could not calculate PostgreSQL tree cost: {e}")
     
     # Time the QAOA optimization itself
     print("Running QAOA optimization...")
@@ -652,32 +854,20 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
     print(f"QAOA optimization completed in {qaoa_optimization_time * 1000:.2f} ms")
     
     duration_qubo, qubo_cost, qubo_order_str = -1, -1, "No valid tree"
+    tree_cost_optimization = -1  # Cost using the optimization model
+    tree_cost_comparison = -1   # Cost using the selected weight model (for comparison)
     
-    # If QAOA failed to find optimal solution, try using DP solution as fallback
-    if error_msg and "No solution found" in error_msg:
-        print(f"\nWarning: QAOA did not find an optimal solution matching DP cost.")
-        print(f"Attempting to use dynamic programming solution as fallback...")
-        try:
-            dp_result = Helping_functions.dynamic_programming(relations, weights)
-            dp_tree = dp_result[0] if len(dp_result) > 0 else None
-            if dp_tree:
-                print(f"Using DP solution as fallback: {dp_tree}")
-                qubo_tree = dp_tree
-                error_msg = None  # Clear error to proceed
-            else:
-                print(f"DP solution also unavailable.")
-        except Exception as e:
-            print(f"Failed to get DP fallback: {e}")
+    # Note: DP removed for performance - QAOA will always return the best solution found
     
     if qubo_tree and not error_msg:
         qubo_order_str = str(qubo_tree)
         
-        # Calculate QAOA cost using multiple methods for comparison
-        tree_cost = -1
+        # Calculate QAOA cost using the selected weight model
         try:
-            tree_cost = calculate_tree_cost(qubo_tree, costs_map)
+            tree_cost_optimization = calculate_tree_cost(qubo_tree, costs_map, join_conditions)
+            tree_cost_comparison = tree_cost_optimization  # Same as optimization model now
             print(f"QAOA tree: {qubo_tree}")
-            print(f"QAOA tree cost calculated: {tree_cost}")
+            print(f"QAOA tree cost ({weight_method} model): {tree_cost_optimization}")
             
             # Extract and display the actual join order from the tree
             def tree_to_join_order(t):
@@ -694,6 +884,8 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
             
         except Exception as e:
             print(f"Error calculating tree cost: {e}")
+            tree_cost_optimization = 0
+            tree_cost_comparison = 0
         
         # Build forced query with nested parentheses to enforce join order
         plan_cost = -1
@@ -701,8 +893,8 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
         
         try:
             # QAOA trees are read right-to-left, so use reverse_qaoa=True
-            # Use nested parentheses for PostgreSQL (with join_collapse_limit=1)
-            forced_from, _ = build_from_clause_recursively(qubo_tree, relations_map, join_conditions, reverse_qaoa=True)
+            # Use nested parentheses to force join order
+            forced_from, _ = build_from_clause_forced(qubo_tree, relations_map, join_conditions, reverse_qaoa=True)
             
             forced_query = f"{query_parts['select']} FROM {forced_from}"
             if 'where' in query_parts: forced_query += f" {query_parts['where']}"
@@ -713,8 +905,21 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
             # Execute with join order forced using join_collapse_limit
             with postgres_conn.cursor() as cur:
                 # Force join order by preventing join reordering
+                # join_collapse_limit=1 prevents the planner from reordering explicit JOINs
+                # from_collapse_limit=1 prevents the planner from collapsing subqueries
                 cur.execute("SET join_collapse_limit = 1;")
                 cur.execute("SET from_collapse_limit = 1;")
+                # Also disable GEQO (genetic query optimizer) which can reorder joins
+                cur.execute("SET geqo = off;")
+                
+                # Verify settings
+                cur.execute("SHOW join_collapse_limit;")
+                join_limit = cur.fetchone()[0]
+                cur.execute("SHOW from_collapse_limit;")
+                from_limit = cur.fetchone()[0]
+                cur.execute("SHOW geqo;")
+                geqo_setting = cur.fetchone()[0]
+                print(f"[DEBUG] join_collapse_limit={join_limit}, from_collapse_limit={from_limit}, geqo={geqo_setting}")
                 
                 # Get EXPLAIN output for the forced query
                 cur.execute(f"EXPLAIN ANALYZE {forced_query}")
@@ -727,24 +932,27 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
                 plan_cost = get_cost_from_postgres_explain(explain_output)
                 
                 # For reporting: use PostgreSQL's estimate of the QAOA plan (apples-to-apples)
-                qubo_cost = plan_cost if plan_cost > 0 else tree_cost
+                qubo_cost = plan_cost if plan_cost > 0 else tree_cost_comparison
                 
-                # Debug output
-                print(f"\nCost Analysis:")
-                print(f"  - QAOA optimized using tree cost: {tree_cost} (simple cardinality model)")
-                print(f"    * This uses cardinality × selectivity: |R| × |S| × (1/max(|R|,|S|)) for joins")
-                print(f"  - PostgreSQL's estimate of QAOA plan: {plan_cost} rows (sophisticated model)")
-                print(f"    * This uses PostgreSQL's cost model: histograms, correlations, etc.")
-                print(f"  - PostgreSQL's estimate of its own plan: {postgres_cost} rows")
-                print(f"  → Using {qubo_cost} for comparison (PostgreSQL's estimate of QAOA plan)")
+                # Show cost comparison using actual EXPLAIN costs
+                print(f"\n=== Cost Comparison (PostgreSQL EXPLAIN Costs) ===")
+                print(f"  - QAOA's plan (forced):        {plan_cost:.2f}")
+                print(f"  - PostgreSQL's plan (default): {postgres_cost:.2f}")
                 
-                # Show if plans match
-                if abs(plan_cost - postgres_cost) < 100:
-                    print(f"  ✓ Plans match! Both optimizers chose the same join order.")
-                elif plan_cost < postgres_cost:
-                    print(f"  ✓ QAOA found a better plan! ({plan_cost} < {postgres_cost})")
+                if plan_cost < postgres_cost:
+                    improvement = ((postgres_cost - plan_cost) / postgres_cost) * 100
+                    print(f"  ✓ QAOA found better join order! ({improvement:.1f}% lower cost)")
                 else:
-                    print(f"  ✗ QAOA's plan is suboptimal ({plan_cost} > {postgres_cost})")
+                    penalty = ((plan_cost - postgres_cost) / postgres_cost) * 100
+                    print(f"  ✗ PostgreSQL prefers its own plan ({penalty:.1f}% lower cost)")
+                
+                weight_model_name = {
+                    'random': 'random weights (1-100)',
+                    'postgres': 'PostgreSQL EXPLAIN estimates (pairwise joins)',
+                    'cardinality': 'cardinality estimates'
+                }.get(weight_method, weight_method)
+                print(f"\n  Note: QAOA optimized using {weight_model_name}.")
+                print(f"        Costs shown are PostgreSQL's actual EXPLAIN estimates for full plans.")
                 
                 # Execute the forced query for timing
                 # Run multiple times and take average to reduce variance
@@ -763,31 +971,36 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
                 print(f"Query execution time: {query_execution_time * 1000:.2f} ms")
                 print(f"Total time (QAOA + execution): {duration_qubo * 1000:.2f} ms")
                 
-                # Reset join collapse limits
+                # Reset join collapse limits and GEQO
                 cur.execute("SET join_collapse_limit = DEFAULT;")
                 cur.execute("SET from_collapse_limit = DEFAULT;")
+                cur.execute("SET geqo = DEFAULT;")
                 
         except Exception as e:
             print(f"Error executing forced QUBO query: {e}")
             import traceback
             traceback.print_exc()
-            # Reset join collapse limits on error
+            # Reset join collapse limits and GEQO on error
             try:
                 with postgres_conn.cursor() as cur:
                     cur.execute("SET join_collapse_limit = DEFAULT;")
                     cur.execute("SET from_collapse_limit = DEFAULT;")
+                    cur.execute("SET geqo = DEFAULT;")
             except:
-                pass
+                        pass
             duration_qubo = -1
-            qubo_cost = tree_cost if tree_cost > 0 else -1
+            qubo_cost = tree_cost_comparison if tree_cost_comparison > 0 else -1
     else:
         print(f"QUBO optimization failed: {error_msg}")
     
     print(f"\n--- Final Results ({num_tables} Tables) ---")
-    print(f"PostgreSQL Default | Time: {duration_postgres * 1000:.2f} ms | Cost: {postgres_cost:<10} | Order: {postgres_order}")
+    # Use actual EXPLAIN costs for final comparison
+    cost_str = f"{postgres_cost:.2f}" if postgres_cost >= 0 else "Unknown"
+    print(f"PostgreSQL Default | Time: {duration_postgres * 1000:.2f} ms | EXPLAIN Cost: {cost_str:<15} | Order: {postgres_order}")
     if duration_qubo >= 0:
-        cost_str = f"{qubo_cost:<10}" if qubo_cost >= 0 else "Unknown   "
-        print(f"QUBO QAOA          | Time: {duration_qubo * 1000:.2f} ms | Cost: {cost_str} | Order: {qubo_order_str}")
+        # qubo_cost is already set to the actual EXPLAIN cost (plan_cost) from line 935
+        cost_str = f"{qubo_cost:.2f}" if qubo_cost >= 0 else "Unknown"
+        print(f"QUBO QAOA          | Time: {duration_qubo * 1000:.2f} ms | EXPLAIN Cost: {cost_str:<15} | Order: {qubo_order_str}")
     else:
         print(f"QUBO QAOA          | Execution Failed")
     
@@ -820,8 +1033,8 @@ def plot_results(results_dict):
         ax2.plot(runs, postgres_costs, 'o-', label='PostgreSQL')
         if qaoa_costs: ax2.plot(runs, qaoa_costs, 's-', label='QAOA')
         ax2.set_xlabel("Run Number")
-        ax2.set_ylabel("Estimated Cost (Cardinality)")
-        ax2.set_title("Estimated Cost Comparison")
+        ax2.set_ylabel("PostgreSQL EXPLAIN Cost")
+        ax2.set_title("Cost Comparison (EXPLAIN Estimates)")
         ax2.set_yscale('log')
         ax2.legend()
         ax2.grid(True, linestyle='--', alpha=0.6)
@@ -833,9 +1046,10 @@ def plot_results(results_dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Join Order Benchmark using PostgreSQL and QAOA.")
     parser.add_argument('--loop', type=int, default=1, metavar='N', help='Number of times to run each benchmark (default: 1).')
-    parser.add_argument('--tables', type=int, default=0, metavar='N', help='Run only N-table benchmark (3 or 4). Default: run both.')
-    parser.add_argument('--weights', type=str, default='cardinality', choices=['cardinality', 'random'], 
-                        help='Weight generation method: "cardinality" (realistic, default) or "random" (research paper style, 1-100)')
+    parser.add_argument('--tables', type=int, default=0, metavar='N', help='Run only N-table benchmark (3, 4, 5, or 6). Default: run all.')
+    parser.add_argument('--weights', type=str, default='postgres', choices=['cardinality', 'random', 'postgres'], 
+                        help='Weight generation method: "postgres" (PostgreSQL EXPLAIN estimates, default), "cardinality" (simple model), or "random" (1-100)')
+    parser.add_argument('--scale', type=float, default=1.0, help='Database scale factor (default: 1.0 = 150k customers, 1.5M orders, 6M lineitems)')
     parser.add_argument('--host', type=str, default='localhost', help='PostgreSQL host (default: localhost)')
     parser.add_argument('--port', type=int, default=5432, help='PostgreSQL port (default: 5432)')
     parser.add_argument('--user', type=str, default='qooqle', help='PostgreSQL user (default: qooqle)')
@@ -845,6 +1059,7 @@ if __name__ == "__main__":
     num_runs = args.loop
     tables_filter = args.tables
     weight_method = args.weights
+    scale_factor = args.scale
 
     # Connect to PostgreSQL
     try:
@@ -862,7 +1077,7 @@ if __name__ == "__main__":
         print("  docker-compose up -d")
         sys.exit(1)
 
-    results_3_tables, results_4_tables = [], []
+    results_3_tables, results_4_tables, results_5_tables, results_6_tables = [], [], [], []
     
     # Different scenarios to test various table size ratios
     scenarios = ['default', 'many_customers', 'large_orders', 'heavy_lineitems', 'balanced_small']
@@ -877,7 +1092,7 @@ if __name__ == "__main__":
             # Use different seed AND scenario for each iteration
             # This creates fundamentally different optimization problems
             run_seed = 42 + i if num_runs > 1 else None
-            setup_database(postgres_conn, scale_factor=0.1, seed=run_seed, scenario=scenario)
+            setup_database(postgres_conn, scale_factor=scale_factor, seed=run_seed, scenario=scenario)
 
             # --- 3-Table Benchmark ---
             if tables_filter == 0 or tables_filter == 3:
@@ -913,6 +1128,46 @@ if __name__ == "__main__":
                 res4 = run_benchmark(4, relations_map_4, relations_4, join_conditions_4, q_parts_4, postgres_conn, weight_method, run_seed)
                 results_4_tables.append(res4)
 
+            # --- 5-Table Benchmark ---
+            if tables_filter == 0 or tables_filter == 5:
+                q_parts_5 = {
+                    "select": "SELECT r.r_name, n.n_name, c.c_name, SUM(l.l_extendedprice) AS total_revenue",
+                    "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey JOIN nation n ON c.c_nationkey = n.n_nationkey JOIN region r ON n.n_regionkey = r.r_regionkey",
+                    "where": "WHERE r.r_name = 'REGION_2'",
+                    "group_by": "GROUP BY r.r_name, n.n_name, c.c_name", "order_by": "ORDER BY total_revenue DESC", "limit": "LIMIT 10"
+                }
+                relations_map_5 = {'l': 'lineitem', 'o': 'orders', 'c': 'customer', 'n': 'nation', 'r': 'region'}
+                relations_5 = ['l', 'o', 'c', 'n', 'r']
+                join_conditions_5 = {
+                    frozenset(['l', 'o']): 'l.l_orderkey = o.o_orderkey',
+                    frozenset(['o', 'c']): 'o.o_custkey = c.c_custkey',
+                    frozenset(['c', 'n']): 'c.c_nationkey = n.n_nationkey',
+                    frozenset(['n', 'r']): 'n.n_regionkey = r.r_regionkey'
+                }
+                res5 = run_benchmark(5, relations_map_5, relations_5, join_conditions_5, q_parts_5, postgres_conn, weight_method, run_seed)
+                results_5_tables.append(res5)
+
+            # --- 6-Table Benchmark ---
+            if tables_filter == 0 or tables_filter == 6:
+                q_parts_6 = {
+                    "select": "SELECT r.r_name, n.n_name, s.s_name, c.c_name, SUM(l.l_extendedprice) AS total_revenue",
+                    "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey JOIN supplier s ON l.l_suppkey = s.s_suppkey JOIN nation n ON c.c_nationkey = n.n_nationkey JOIN region r ON n.n_regionkey = r.r_regionkey",
+                    "where": "WHERE r.r_name = 'REGION_2'",
+                    "group_by": "GROUP BY r.r_name, n.n_name, s.s_name, c.c_name", "order_by": "ORDER BY total_revenue DESC", "limit": "LIMIT 10"
+                }
+                relations_map_6 = {'l': 'lineitem', 'o': 'orders', 'c': 'customer', 's': 'supplier', 'n': 'nation', 'r': 'region'}
+                relations_6 = ['l', 'o', 'c', 's', 'n', 'r']
+                join_conditions_6 = {
+                    frozenset(['l', 'o']): 'l.l_orderkey = o.o_orderkey',
+                    frozenset(['o', 'c']): 'o.o_custkey = c.c_custkey',
+                    frozenset(['l', 's']): 'l.l_suppkey = s.s_suppkey',
+                    frozenset(['c', 'n']): 'c.c_nationkey = n.n_nationkey',
+                    frozenset(['s', 'n']): 's.s_nationkey = n.n_nationkey',
+                    frozenset(['n', 'r']): 'n.n_regionkey = r.r_regionkey'
+                }
+                res6 = run_benchmark(6, relations_map_6, relations_6, join_conditions_6, q_parts_6, postgres_conn, weight_method, run_seed)
+                results_6_tables.append(res6)
+
         if num_runs > 1 and PLOTTING_ENABLED:
             print("\n--- Generating plots... ---")
             results_to_plot = {}
@@ -920,6 +1175,10 @@ if __name__ == "__main__":
                 results_to_plot[3] = results_3_tables
             if results_4_tables:
                 results_to_plot[4] = results_4_tables
+            if results_5_tables:
+                results_to_plot[5] = results_5_tables
+            if results_6_tables:
+                results_to_plot[6] = results_6_tables
             if results_to_plot:
                 plot_results(results_to_plot)
         elif num_runs > 1:
