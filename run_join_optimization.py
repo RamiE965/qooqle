@@ -14,6 +14,7 @@ from scipy.sparse import SparseEfficiencyWarning
 # Suppress scipy sparse matrix efficiency warnings
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
 
+# SSS_QUBO import assumes it's in the same directory or python path
 from SSS_QUBO import QUBO_formulation, QUBO_Split_Optimization_func, Helping_functions, SolverType
 
 # Conditional import for plotting
@@ -60,6 +61,37 @@ def parse_row_cardinality(s):
         print(f"Warning: Could not parse row cardinality string '{s}'. Error: {e}")
         return 0
 
+def is_connected(tables_subset, join_conditions):
+    """
+    Checks if a subset of tables forms a connected graph based on join conditions.
+    Uses a simple Breadth-First Search (BFS).
+    """
+    if not tables_subset:
+        return True
+    
+    subset = set(tables_subset)
+    if len(subset) <= 1:
+        return True
+
+    start_node = list(subset)[0]
+    
+    visited = {start_node}
+    queue = [start_node]
+    
+    while queue:
+        current_node = queue.pop(0)
+        
+        # Find neighbors within the subset
+        for other_node in subset:
+            if other_node not in visited:
+                # Check if a join condition exists between them
+                if frozenset([current_node, other_node]) in join_conditions:
+                    visited.add(other_node)
+                    queue.append(other_node)
+                    
+    # The graph is connected if BFS visited all nodes in the subset
+    return visited == subset
+
 def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
     """
     Sets up the PostgreSQL database.
@@ -76,41 +108,41 @@ def setup_database(connection, scale_factor=0.1, seed=None, scenario='default'):
     scenarios = {
         'default': {
             'nations': 25,
-            'customers_mult': 1.0,    # 1,500 customers
-            'orders_mult': 1.0,       # 15,000 orders
-            'lineitems_mult': 1.0,    # 60,000 lineitems
+            'customers_mult': 1.0,      # 1,500 customers
+            'orders_mult': 1.0,         # 15,000 orders
+            'lineitems_mult': 1.0,      # 60,000 lineitems
             'order_cust_ratio': 1.0,  # Normal distribution
             'lineitem_order_ratio': 1.0
         },
         'many_customers': {
             'nations': 25,
-            'customers_mult': 3.0,    # 4,500 customers (3x more)
-            'orders_mult': 1.0,       # 15,000 orders (same)
-            'lineitems_mult': 0.8,    # 48,000 lineitems (fewer)
+            'customers_mult': 3.0,      # 4,500 customers (3x more)
+            'orders_mult': 1.0,         # 15,000 orders (same)
+            'lineitems_mult': 0.8,      # 48,000 lineitems (fewer)
             'order_cust_ratio': 0.5,  # Fewer orders per customer
             'lineitem_order_ratio': 0.8
         },
         'large_orders': {
             'nations': 25,
-            'customers_mult': 0.6,    # 900 customers (fewer)
-            'orders_mult': 2.0,       # 30,000 orders (2x more)
-            'lineitems_mult': 1.5,    # 90,000 lineitems (more)
+            'customers_mult': 0.6,      # 900 customers (fewer)
+            'orders_mult': 2.0,         # 30,000 orders (2x more)
+            'lineitems_mult': 1.5,      # 90,000 lineitems (more)
             'order_cust_ratio': 2.0,  # More orders per customer
             'lineitem_order_ratio': 1.2
         },
         'heavy_lineitems': {
             'nations': 25,
-            'customers_mult': 0.8,    # 1,200 customers
-            'orders_mult': 0.7,       # 10,500 orders (fewer)
-            'lineitems_mult': 2.5,    # 150,000 lineitems (huge!)
+            'customers_mult': 0.8,      # 1,200 customers
+            'orders_mult': 0.7,         # 10,500 orders (fewer)
+            'lineitems_mult': 2.5,      # 150,000 lineitems (huge!)
             'order_cust_ratio': 1.2,
             'lineitem_order_ratio': 3.0  # Many items per order
         },
         'balanced_small': {
             'nations': 25,
-            'customers_mult': 0.5,    # 750 customers
-            'orders_mult': 0.5,       # 7,500 orders
-            'lineitems_mult': 0.5,    # 30,000 lineitems
+            'customers_mult': 0.5,      # 750 customers
+            'orders_mult': 0.5,         # 7,500 orders
+            'lineitems_mult': 0.5,      # 30,000 lineitems
             'order_cust_ratio': 1.0,
             'lineitem_order_ratio': 1.0
         }
@@ -409,6 +441,13 @@ def get_join_costs_postgres(conn, relations_map, relations, join_conditions, que
     weights = []
     sublists = QUBO_formulation.relation_sublists(relations)
     
+    # NEW: Find all aliases referenced in the WHERE clause
+    where_clause = query_parts.get('where', '')
+    all_aliases = relations_map.keys()
+    # This regex finds any alias (e.g., 'l', 'o', 'c') followed by a dot
+    alias_pattern = r'\b(' + '|'.join(re.escape(alias) for alias in all_aliases) + r')\.'
+    where_aliases = set(re.findall(alias_pattern, where_clause))
+    
     print("\nQuerying PostgreSQL for join cost estimates:")
     
     with conn.cursor() as cur:
@@ -416,25 +455,36 @@ def get_join_costs_postgres(conn, relations_map, relations, join_conditions, que
             if len(combo) < 2:
                 continue
             
-            # For multi-table joins (3+), skip PostgreSQL estimation since costs are tree-structure dependent
-            # Use sum of valid (non-cross-product) pairwise join costs as estimate
-            # This represents the cost if we did all valid joins sequentially
+            # --- FIX: This entire block is new/modified ---
+            # For multi-table joins (3+), check connectivity
             if len(combo) > 2:
-                # Sum only valid join costs (those with join conditions)
-                pairwise_costs = []
-                for i in range(len(combo)):
-                    for j in range(i+1, len(combo)):
-                        key = frozenset([combo[i], combo[j]])
-                        if key in join_conditions:  # Only include valid joins
-                            cost = costs_map.get(key, 1000)
-                            if cost < 999999999:  # Exclude penalty costs
-                                pairwise_costs.append(cost)
                 
-                cost = sum(pairwise_costs) if pairwise_costs else 1000
+                # NEW CONNECTIVITY CHECK
+                if not is_connected(combo, join_conditions):
+                    # If the subset is NOT connected, it's an invalid plan.
+                    # Assign the massive cross-product penalty.
+                    cost = 999999999999  # Massive penalty
+                    print(f"  {combo}: {cost:,} (cross product penalty - disconnected subset)")
+                
+                else:
+                    # OLD LOGIC (now in an 'else' block)
+                    # The subset is connected, so its cost is the sum of its parts.
+                    pairwise_costs = []
+                    for i in range(len(combo)):
+                        for j in range(i+1, len(combo)):
+                            key = frozenset([combo[i], combo[j]])
+                            if key in join_conditions: 
+                                cost_val = costs_map.get(key, 1000) # Use cost_val to avoid shadowing
+                                if cost_val < 999999999:
+                                    pairwise_costs.append(cost_val)
+                    
+                    cost = sum(pairwise_costs) if pairwise_costs else 1000
+                    print(f"  {combo}: {cost} (sum of valid pairwise joins)")
+                
                 costs_map[frozenset(combo)] = cost
                 weights.append(cost)
-                print(f"  {combo}: {cost} (sum of valid pairwise joins)")
                 continue
+            # --- END FIX ---
             
             try:
                 # Use savepoint for each query so failures don't abort the whole transaction
@@ -463,9 +513,12 @@ def get_join_costs_postgres(conn, relations_map, relations, join_conditions, que
                         cur.execute("RELEASE SAVEPOINT cost_estimate;")
                         continue
                 
-                # Add WHERE clause if present (for filtering)
-                if 'where' in query_parts:
+                # --- FIX (This is the fix from the *previous* turn) ---
+                # MODIFIED: Only add the WHERE clause if all its referenced tables are in the current combo
+                combo_set = set(combo)
+                if where_aliases.issubset(combo_set):
                     test_query += f" {query_parts['where']}"
+                # --- FIX END ---
                 
                 # Use EXPLAIN to get cost estimate
                 cur.execute(f"EXPLAIN {test_query}")
@@ -902,7 +955,7 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
                     cur.execute("SET from_collapse_limit = DEFAULT;")
                     cur.execute("SET geqo = DEFAULT;")
             except:
-                        pass
+                    pass
             duration_qubo = -1
             qubo_cost = tree_cost_comparison if tree_cost_comparison > 0 else -1
     else:
@@ -964,12 +1017,12 @@ if __name__ == "__main__":
     parser.add_argument('--tables', type=int, default=0, metavar='N', help='Run only N-table benchmark (3, 4, 5, or 6). Default: run all.')
     parser.add_argument('--weights', type=str, default='postgres', choices=['cardinality', 'random', 'postgres'], 
                         help='Weight generation method: "postgres" (PostgreSQL EXPLAIN estimates, default), "cardinality" (simple model), or "random" (1-100)')
-    parser.add_argument('--scale', type=float, default=1.0, help='Database scale factor (default: 1.0 = 150k customers, 1.5M orders, 6M lineitems)')
+    parser.add_argument('--scale', type=float, default=1.0, help='Database scale factor (default: 1.0 = 15k customers, 150k orders, 600k lineitems)')
     parser.add_argument('--host', type=str, default='localhost', help='PostgreSQL host (default: localhost)')
     parser.add_argument('--port', type=int, default=5432, help='PostgreSQL port (default: 5432)')
-    parser.add_argument('--user', type=str, default='postgres', help='PostgreSQL user (default: qooqle)')
-    parser.add_argument('--password', type=str, default='postgres', help='PostgreSQL password (default: qooqle)')
-    parser.add_argument('--database', type=str, default='db', help='PostgreSQL database (default: qooqle_db)')
+    parser.add_argument('--user', type=str, default='postgres', help='PostgreSQL user (default: postgres)')
+    parser.add_argument('--password', type=str, default='postgres', help='PostgreSQL password (default: postgres)')
+    parser.add_argument('--database', type=str, default='db', help='PostgreSQL database (default: db)')
     args = parser.parse_args()
     num_runs = args.loop
     tables_filter = args.tables
@@ -1066,7 +1119,7 @@ if __name__ == "__main__":
             if tables_filter == 0 or tables_filter == 6:
                 q_parts_6 = {
                     "select": "SELECT r.r_name, n.n_name, s.s_name, c.c_name, SUM(l.l_extendedprice) AS total_revenue",
-                    "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey JOIN supplier s ON l.l_suppkey = s.s_suppkey JOIN nation n ON c.c_nationkey = n.n_nationkey JOIN region r ON n.n_regionkey = r.r_regionkey",
+                    "from": "FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey JOIN supplier s ON l.l_suppkey = s.s_suppkey JOIN nation n ON c.c_nationkey = n.n_nationkey JOIN region r ON n.n_regionkey = r.r_key",
                     "where": "WHERE r.r_name = 'REGION_2'",
                     "group_by": "GROUP BY r.r_name, n.n_name, s.s_name, c.c_name", "order_by": "ORDER BY total_revenue DESC", "limit": "LIMIT 10"
                 }
@@ -1102,4 +1155,3 @@ if __name__ == "__main__":
     finally:
         postgres_conn.close()
         print("\nPostgreSQL connection closed.")
-
