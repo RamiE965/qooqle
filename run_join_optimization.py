@@ -587,104 +587,22 @@ def parse_join_order_from_postgres(explain_output):
     """
     Parse join order from PostgreSQL EXPLAIN output.
     PostgreSQL's EXPLAIN shows join order in the plan tree structure.
-    We need to parse the nested structure to determine the actual join order.
+    The order of table scans in the output reflects the join execution order.
     """
     try:
-        # Extract all table scans with their aliases
-        # Look for patterns like "Seq Scan on customer c" or "Index Scan using idx_orders_custkey on orders o"
+        # Extract table names (aliases) from the plan in the order they appear
+        # Look for patterns like "Seq Scan on customer c" or "Index Scan using..."
         table_pattern = r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan).*?on\s+(\w+)\s+(\w+)'
         matches = re.findall(table_pattern, explain_output, re.IGNORECASE)
         
-        # Create a mapping of alias to table name
-        alias_to_table = {alias: table for table, alias in matches}
-        all_aliases = set(alias_to_table.keys())
-        
-        # Extract join conditions to understand relationships
-        # Pattern: "Hash Cond: (c.c_nationkey = n.n_nationkey)" or "Index Cond: (o_custkey = c.c_custkey)"
-        join_pattern = r'(?:Hash Cond|Index Cond|Join Filter):\s*\(?(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)\)?'
-        join_matches = re.findall(join_pattern, explain_output, re.IGNORECASE)
-        
-        # Build a graph of join relationships (which tables join to which)
-        join_graph = {}
-        for t1, col1, t2, col2 in join_matches:
-            if t1 in all_aliases and t2 in all_aliases:
-                if t1 not in join_graph:
-                    join_graph[t1] = []
-                if t2 not in join_graph:
-                    join_graph[t2] = []
-                join_graph[t1].append(t2)
-                join_graph[t2].append(t1)
-        
-        # Parse the plan structure by analyzing indentation and join types
-        # PostgreSQL plans are tree-structured: outer -> inner in nested loops
-        lines = explain_output.split('\n')
-        
-        # Find all table scans in order of appearance (depth-first traversal)
-        # This gives us the order they appear in the plan tree
-        scan_order = []
-        for line in lines:
-            # Look for table scans
-            scan_match = re.search(r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan).*?on\s+(\w+)\s+(\w+)', line, re.IGNORECASE)
-            if scan_match:
-                table_name, alias = scan_match.groups()
-                if alias not in scan_order:
-                    scan_order.append(alias)
-        
-        # Build join order by following the join relationships
-        # Start with the first table in scan order
+        # Build order based on the sequence of table scans (preserving first occurrence)
         order = []
         seen = set()
         
-        if scan_order:
-            # Start with the first table
-            order.append(scan_order[0])
-            seen.add(scan_order[0])
-            
-            # Build order by following join relationships
-            # For each remaining table, find which already-seen table it joins to
-            remaining = [a for a in scan_order[1:] if a not in seen]
-            
-            while remaining:
-                added_any = False
-                for alias in remaining[:]:  # Copy list to iterate safely
-                    # Find which already-seen table this joins to
-                    for seen_alias in seen:
-                        if seen_alias in join_graph and alias in join_graph.get(seen_alias, []):
-                            order.append(alias)
-                            seen.add(alias)
-                            remaining.remove(alias)
-                            added_any = True
-                            break
-                    
-                    if not added_any:
-                        # If no join found, check if it's a direct join condition
-                        # Sometimes the join condition shows the relationship
-                        for t1, col1, t2, col2 in join_matches:
-                            if t1 == alias and t2 in seen:
-                                order.append(alias)
-                                seen.add(alias)
-                                if alias in remaining:
-                                    remaining.remove(alias)
-                                added_any = True
-                                break
-                            elif t2 == alias and t1 in seen:
-                                order.append(alias)
-                                seen.add(alias)
-                                if alias in remaining:
-                                    remaining.remove(alias)
-                                added_any = True
-                                break
-                
-                # If we couldn't add any more, just add remaining tables in order
-                if not added_any and remaining:
-                    for alias in remaining:
-                        order.append(alias)
-                        seen.add(alias)
-                    break
-        
-        # Fallback: if we couldn't build order, use scan order
-        if not order and scan_order:
-            order = scan_order
+        for table_name, alias in matches:
+            if alias not in seen:
+                order.append(alias)
+                seen.add(alias)
         
         return " -> ".join(order) if order else "Could not determine join order."
     except Exception as e:
@@ -698,29 +616,26 @@ def get_cost_from_postgres_explain(explain_output):
     PostgreSQL shows costs as "cost=0.00..123.45 rows=1000"
     
     COST CALCULATION METHOD:
-    - We extract the TOTAL COST (second number) from the root node
-    - This represents the total cost including ALL intermediate join operations
-    - This is the proper cost metric for comparison (not just final row count)
-    - PostgreSQL's cost units are arbitrary (based on I/O, CPU, etc.)
-    - We use this to compare with QAOA's total tree cost (sum of all join operations)
+    - We extract the total cost from the root node (first line of EXPLAIN output)
+    - The cost is in PostgreSQL's arbitrary units (includes I/O, CPU, etc.)
+    - Format: cost=startup_cost..total_cost where total_cost is the full query cost
+    - This represents PostgreSQL's estimate of the query execution cost
     
-    Returns: Total cost (as float) or -1 if parsing fails
+    Returns: Total cost estimate (as integer) or -1 if parsing fails
     """
     try:
-        # Find the root node's cost (first cost in the plan - the Limit node)
+        # Find the root node's cost (first cost in the plan - top of the tree)
         # Pattern: "cost=0.00..123.45 rows=1000"
         cost_pattern = r'cost=([\d.]+)\.\.([\d.]+)\s+rows=(\d+)'
         matches = re.findall(cost_pattern, explain_output)
         
         if matches:
-            # Get the FIRST (root) node's cost - the Limit node is at the top
-            # The root node is the first match, not the last
-            root_match = matches[0]
-            startup_cost = float(root_match[0])  # First number is startup cost
-            total_cost = float(root_match[1])  # Second number is total cost (includes all operations)
-            rows = int(root_match[2])
-            print(f"[DEBUG] PostgreSQL root node: startup_cost={startup_cost}, total_cost={total_cost}, rows={rows}")
-            return total_cost  # Return total cost (includes all intermediate joins)
+            # Get the first (root) node's cost - this is the top-level operation
+            first_match = matches[0]
+            total_cost = float(first_match[1])  # Second number is total cost
+            rows = int(first_match[2])
+            print(f"[DEBUG] PostgreSQL cost: {total_cost}, rows: {rows}")
+            return int(total_cost)  # Return total cost (not rows)
         
         return -1
     except Exception as e:
@@ -1052,9 +967,9 @@ if __name__ == "__main__":
     parser.add_argument('--scale', type=float, default=1.0, help='Database scale factor (default: 1.0 = 150k customers, 1.5M orders, 6M lineitems)')
     parser.add_argument('--host', type=str, default='localhost', help='PostgreSQL host (default: localhost)')
     parser.add_argument('--port', type=int, default=5432, help='PostgreSQL port (default: 5432)')
-    parser.add_argument('--user', type=str, default='qooqle', help='PostgreSQL user (default: qooqle)')
-    parser.add_argument('--password', type=str, default='qooqle', help='PostgreSQL password (default: qooqle)')
-    parser.add_argument('--database', type=str, default='qooqle_db', help='PostgreSQL database (default: qooqle_db)')
+    parser.add_argument('--user', type=str, default='postgres', help='PostgreSQL user (default: qooqle)')
+    parser.add_argument('--password', type=str, default='postgres', help='PostgreSQL password (default: qooqle)')
+    parser.add_argument('--database', type=str, default='db', help='PostgreSQL database (default: qooqle_db)')
     args = parser.parse_args()
     num_runs = args.loop
     tables_filter = args.tables
