@@ -395,43 +395,22 @@ def parse_join_order_from_postgres(explain_output):
     """
     Parse join order from PostgreSQL EXPLAIN output.
     PostgreSQL's EXPLAIN shows join order in the plan tree structure.
+    The order of table scans in the output reflects the join execution order.
     """
     try:
-        # Extract table names from the plan
+        # Extract table names (aliases) from the plan in the order they appear
         # Look for patterns like "Seq Scan on customer c" or "Index Scan using..."
         table_pattern = r'(?:Seq Scan|Index Scan|Bitmap Heap Scan|Index Only Scan).*?on\s+(\w+)\s+(\w+)'
         matches = re.findall(table_pattern, explain_output, re.IGNORECASE)
         
-        # Also look for join conditions to infer order
-        join_pattern = r'(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)'
-        join_matches = re.findall(join_pattern, explain_output)
-        
-        # Build order from joins
+        # Build order based on the sequence of table scans (preserving first occurrence)
         order = []
         seen = set()
         
-        # First, collect all tables mentioned
-        all_tables = set()
         for table_name, alias in matches:
-            all_tables.add(alias)
-        
-        # Try to build order from join conditions
-        for t1, col1, t2, col2 in join_matches:
-            if t1 not in seen and t2 not in seen:
-                order.extend([t1, t2])
-                seen.update([t1, t2])
-            elif t1 in seen and t2 not in seen:
-                order.append(t2)
-                seen.add(t2)
-            elif t2 in seen and t1 not in seen:
-                order.append(t1)
-                seen.add(t1)
-        
-        # If we couldn't determine from joins, use table scan order
-        if not order:
-            for table_name, alias in matches:
-                if alias not in order:
-                    order.append(alias)
+            if alias not in seen:
+                order.append(alias)
+                seen.add(alias)
         
         return " -> ".join(order) if order else "Could not determine join order."
     except Exception as e:
@@ -443,26 +422,26 @@ def get_cost_from_postgres_explain(explain_output):
     PostgreSQL shows costs as "cost=0.00..123.45 rows=1000"
     
     COST CALCULATION METHOD:
-    - We extract the 'rows' estimate from the root node (final result cardinality)
-    - This represents the estimated number of rows in the final result
-    - This is used as a cost metric for comparison (similar to how DuckDB uses cardinality)
-    - Note: PostgreSQL also has a 'cost' value (in arbitrary units), but we use rows for consistency
+    - We extract the total cost from the root node (first line of EXPLAIN output)
+    - The cost is in PostgreSQL's arbitrary units (includes I/O, CPU, etc.)
+    - Format: cost=startup_cost..total_cost where total_cost is the full query cost
+    - This represents PostgreSQL's estimate of the query execution cost
     
-    Returns: Estimated row count (as integer) or -1 if parsing fails
+    Returns: Total cost estimate (as integer) or -1 if parsing fails
     """
     try:
-        # Find the root node's cost (last cost in the plan)
+        # Find the root node's cost (first cost in the plan - top of the tree)
         # Pattern: "cost=0.00..123.45 rows=1000"
         cost_pattern = r'cost=([\d.]+)\.\.([\d.]+)\s+rows=(\d+)'
         matches = re.findall(cost_pattern, explain_output)
         
         if matches:
-            # Get the last (root) node's cost
-            last_match = matches[-1]
-            total_cost = float(last_match[1])  # Second number is total cost
-            rows = int(last_match[2])
+            # Get the first (root) node's cost - this is the top-level operation
+            first_match = matches[0]
+            total_cost = float(first_match[1])  # Second number is total cost
+            rows = int(first_match[2])
             print(f"[DEBUG] PostgreSQL cost: {total_cost}, rows: {rows}")
-            return int(rows)  # Return rows as cost metric (similar to DuckDB)
+            return int(total_cost)  # Return total cost (not rows)
         
         return -1
     except Exception as e:
@@ -838,9 +817,9 @@ if __name__ == "__main__":
                         help='Weight generation method: "cardinality" (realistic, default) or "random" (research paper style, 1-100)')
     parser.add_argument('--host', type=str, default='localhost', help='PostgreSQL host (default: localhost)')
     parser.add_argument('--port', type=int, default=5432, help='PostgreSQL port (default: 5432)')
-    parser.add_argument('--user', type=str, default='qooqle', help='PostgreSQL user (default: qooqle)')
-    parser.add_argument('--password', type=str, default='qooqle', help='PostgreSQL password (default: qooqle)')
-    parser.add_argument('--database', type=str, default='qooqle_db', help='PostgreSQL database (default: qooqle_db)')
+    parser.add_argument('--user', type=str, default='postgres', help='PostgreSQL user (default: qooqle)')
+    parser.add_argument('--password', type=str, default='postgres', help='PostgreSQL password (default: qooqle)')
+    parser.add_argument('--database', type=str, default='db', help='PostgreSQL database (default: qooqle_db)')
     args = parser.parse_args()
     num_runs = args.loop
     tables_filter = args.tables
