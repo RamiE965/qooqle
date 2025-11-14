@@ -15,15 +15,41 @@ from enum import Enum, auto
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
 
 # Qiskit (Quantum & Classical Optimization) - Updated for your specific environment
+# Qiskit (Quantum & Classical Optimization) - Updated for your specific environment
+# Qiskit (Quantum & Classical Optimization) - Updated for your specific environment
+# Qiskit (Quantum & Classical Optimization) - Updated for your specific environment
 try:
     from qiskit_optimization import QuadraticProgram
     from qiskit_optimization.algorithms import MinimumEigenOptimizer
-    from qiskit_algorithms import NumPyMinimumEigensolver, QAOA
+    
+    # --- V2 ALGORITHM IMPORTS ---
+    # Use the NEW standalone V2-compatible package (with UNDERSCORE)
+    from qiskit_algorithms.minimum_eigensolvers import QAOA, NumPyMinimumEigensolver
     from qiskit_algorithms.optimizers import COBYLA
-    from qiskit.primitives import StatevectorSampler  # Use what's actually available
+    
+    # --- V2 PRIMITIVE IMPORTS ---
+    from qiskit.primitives import StatevectorSampler as LocalSamplerV2
+    from qiskit_ibm_runtime import QiskitRuntimeService
+    from qiskit_ibm_runtime import SamplerV2 as IBMSamplerV2
+
+    # --- TRANSPILER IMPORTS ---
+    # We need these to manually transpile the circuit for V2
+    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+    from qiskit.circuit.library import QAOAAnsatz
     
     QISKIT_AVAILABLE = True
+    api_token = "xx_l-W4A0e0ixmnM5jPCzh_v5b_XIwkcTPP_GxM8u2Y-"
+    QiskitRuntimeService.save_account(channel="ibm_quantum_platform", token=api_token, overwrite=True)
     print("Qiskit packages available - QAOA solver enabled")
+
+    accounts = QiskitRuntimeService.saved_accounts()
+    print("Saved accounts:", accounts)
+
+    # Try to connect and list backends
+    service = QiskitRuntimeService()
+    print("\nAvailable backends:")
+    for backend in service.backends():
+        print(f"  - {backend.name}: {backend.num_qubits} qubits")
     
 except ImportError as e:
     QISKIT_AVAILABLE = False
@@ -38,7 +64,6 @@ try:
 except ImportError:
     CLASSICAL_OPT_AVAILABLE = False
     print("Warning: Classical optimization packages (dimod, neal) not available.")
-
 
 class SolverType(Enum):
     QAOA = auto()
@@ -211,16 +236,131 @@ class Solvers_qiskit:
     def qaoa(qp_bqm_tuple, reps=3, seed=30):
         """
         QAOA -> SampleSet.
+        Connects to IBM Quantum Cloud (V2 Primitives)
+        This version MANUALLY REPLACES MinimumEigenOptimizer to solve V2 transpilation.
         """
         if not QISKIT_AVAILABLE:
             raise ValueError("Qiskit packages not available. Cannot use qaoa solver.")
+        
         qp, bqm = qp_bqm_tuple
         
-        sampler = StatevectorSampler()
-        qaoa_mes = QAOA(sampler=sampler, optimizer=COBYLA(), reps=reps)
-        res = MinimumEigenOptimizer(qaoa_mes).solve(qp)
-        return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res.x)
+        print("\n" + "="*60)
+        print("[Quantum] ATTEMPTING IBM QUANTUM CLOUD EXECUTION")
+        print("="*60)
+        
+        from qiskit_algorithms.minimum_eigensolvers import SamplingVQE
 
+        sampler_v2 = None
+        isa_ansatz = None
+        isa_operator = None
+
+        # 1. Convert problem to cost operator 
+        print("[Quantum] Step 1: Converting QuadraticProgram to cost operator...")
+        cost_operator, offset = qp.to_ising()
+        num_vars = cost_operator.num_qubits
+        print(f"[Quantum] ✓ Cost operator created ({num_vars} qubits).")
+
+        # 2. Abstract QAOA circuit (ansatz)
+        print(f"[Quantum] Step 2: Creating {num_vars}-qubit QAOA ansatz...")
+        ansatz = QAOAAnsatz(cost_operator=cost_operator, reps=reps)
+        print("[Quantum] ✓ Ansatz created.")
+
+        try:
+            # 3. Connect 
+            print("[Quantum] Step 3: Connecting to IBM Quantum service...")
+            
+            service = QiskitRuntimeService(
+                instance="crn:v1:bluemix:public:quantum-computing:us-east:a/eb294d4f5d2b4db5a7ba972891e4b119:6d876c85-9d2c-4fa9-bed1-c7e241ac10a2::"
+            )
+            # ------------------------------------------
+
+            print("[Quantum] ✓ Connected successfully to new instance")
+
+            # 4. Select backend
+            backend_name = "ibm_marrakesh"
+            print(f"[Quantum] Step 4: Selecting backend '{backend_name}'...")
+            backend = service.backend(backend_name)
+            status = backend.status()
+            print(f"[Quantum] ✓ Backend selected: {backend.name}")
+            print(f"[Quantum]   Status: {status.status_msg} | Queue: {status.pending_jobs} jobs")
+            
+            # 5. Create the transpiler
+            print(f"[Quantum] Step 5: Creating transpiler for '{backend_name}'...")
+            pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
+            print("[Quantum] ✓ Transpiler created.")
+
+            # 6. Transpile Circuit & Operator
+            print(f"[Quantum] Step 6.1: Transpiling ansatz...")
+            isa_ansatz = pm.run(ansatz)
+            print(f"[Quantum] ✓ Ansatz transpiled (now {isa_ansatz.num_qubits} qubits).")
+            
+            print(f"[Quantum] Step 6.2: Applying circuit layout to operator...")
+            isa_operator = cost_operator.apply_layout(isa_ansatz.layout)
+            print(f"[Quantum] ✓ Operator layout applied (now {isa_operator.num_qubits} qubits).")
+
+            # 7. Instantiate cloud sampler
+            print("[Quantum] Step 7: Initializing IBMSamplerV2...")
+            sampler_v2 = IBMSamplerV2(backend)
+            print("[Quantum] ✓ V2 Cloud Sampler created.")
+
+        except Exception as e:
+            print(f"\n[Quantum] CLOUD CONNECTION FAILED: {type(e).__name__}: {e}")
+            print("[Quantum] FALL BACK")
+            print("="*60 + "\n")
+            sampler_v2 = LocalSamplerV2() 
+            isa_ansatz = ansatz         
+            isa_operator = cost_operator 
+        
+        # 8. Run Job
+        print(f"[Quantum] Step 8: Submitting V2 SamplingVQE job...")
+        if isinstance(sampler_v2, IBMSamplerV2):
+             print("[Quantum] ⏳ Job is queued on IBM Quantum hardware...")
+        else:
+             print("[Quantum] 🚀 Running on local simulator...")
+
+        vqe_mes = SamplingVQE(
+            sampler=sampler_v2,
+            ansatz=isa_ansatz,
+            optimizer=COBYLA()
+        )
+        
+        eigen_result = vqe_mes.compute_minimum_eigenvalue(isa_operator)
+
+        # safeguard print everything job returns
+        print("\n" + "*"*60)
+        print("[Quantum] DEBUG: Raw EigenResult from VQE")
+        print(eigen_result)
+        print("*"*60 + "\n")
+        # -----------------------------
+
+        # 9. Extract result
+        print("[Quantum] Step 9: Extracting results from eigenstate...")
+        eigenstate_data = eigen_result.eigenstate
+        probabilities = None
+
+        if hasattr(eigenstate_data, "binary_probabilities"):
+            probabilities = eigenstate_data.binary_probabilities()
+        # cloud returns raw dict
+        elif isinstance(eigenstate_data, dict):
+            probabilities = eigenstate_data
+        else:
+            raise TypeError(f"Unknown eigenstate format: {type(eigenstate_data)}")
+
+        best_bitstring_str = max(probabilities, key=probabilities.get)
+        print(f"[Quantum] ✓ Best bitstring found: {best_bitstring_str}")
+        
+        # reverse to match convention
+        res_x = [float(bit) for bit in reversed(best_bitstring_str)]
+
+        if isinstance(sampler_v2, IBMSamplerV2):
+            print("[Quantum] ✅ QAOA JOB COMPLETED ON QUANTUM HARDWARE!")
+        else:
+            print("[Quantum] ✅ QAOA JOB COMPLETED ON LOCAL SIMULATOR.")
+        print("="*60 + "\n")
+        
+        # Return the raw result (the list of bits)
+        return Solvers_qiskit._qp_solution_to_sampleset(qp, bqm, res_x)
+        
     # @staticmethod
     # def simulated_annealing(qp_bqm_tuple):
     #     """
