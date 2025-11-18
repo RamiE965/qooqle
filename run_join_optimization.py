@@ -455,11 +455,9 @@ def get_join_costs_postgres(conn, relations_map, relations, join_conditions, que
             if len(combo) < 2:
                 continue
             
-            # --- FIX: This entire block is new/modified ---
             # For multi-table joins (3+), check connectivity
             if len(combo) > 2:
                 
-                # NEW CONNECTIVITY CHECK
                 if not is_connected(combo, join_conditions):
                     # If the subset is NOT connected, it's an invalid plan.
                     # Assign the massive cross-product penalty.
@@ -806,7 +804,7 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
     print("Running QAOA optimization...")
     qaoa_start_time = time.time()
     
-    original_stdout, sys.stdout = sys.stdout, StringIO()
+    # original_stdout, sys.stdout = sys.stdout, StringIO()
     try:
         optimizer = QUBO_Split_Optimization_func(f"join_log_{num_tables}")
         qubo_tree, _, error_msg = optimizer.finding_opt_jo(relations, weights, SolverType.QAOA)
@@ -816,7 +814,8 @@ def run_benchmark(num_tables, relations_map, relations, join_conditions, query_p
         print(f"QAOA optimization exception: {e}")
         traceback.print_exc()
     finally:
-        sys.stdout = original_stdout
+        # sys.stdout = original_stdout
+        pass
     
     qaoa_optimization_time = time.time() - qaoa_start_time
     print(f"QAOA optimization completed in {qaoa_optimization_time * 1000:.2f} ms")
