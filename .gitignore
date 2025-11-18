@@ -1,4 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
 .venv
+env/
+ENV/
+
+# Logs
+*.log
+servers/qubo/*.log
 */servers/qubo/*
-servers/qubo/*
-__pycache__
+
+# Node modules
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files and temporary scripts
+test_*.sh
+*_test.py
