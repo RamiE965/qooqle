@@ -212,10 +212,199 @@ def enter_query_menu(session: CLISession) -> bool:
         return False
 
 
+def run_postgres_benchmark_only(postgres_conn, num_tables, relations_map, relations, join_conditions, query_parts):
+    """
+    Run only PostgreSQL benchmark (default optimizer).
+    """
+    from run_join_optimization import (
+        parse_postgres_join_tree,
+        get_cost_from_postgres_explain,
+        parse_join_order_from_postgres
+    )
+    import time
+    
+    print(f"\n" + "="*50 + f"\n### STARTING {num_tables}-TABLE BENCHMARK (PostgreSQL Only) ###\n" + "="*50 + "\n")
+    
+    query = f"{query_parts['select']} {query_parts['from']}"
+    if 'where' in query_parts: query += f" {query_parts['where']}"
+    query += f" {query_parts['group_by']} {query_parts['order_by']} {query_parts['limit']};"
+
+    print("--- Running PostgreSQL Benchmark (Default Optimizer) ---")
+    with postgres_conn.cursor() as cur:
+        cur.execute("DISCARD PLANS;")
+        cur.execute(query)
+        cur.fetchall()
+        
+        cur.execute(f"EXPLAIN ANALYZE {query}")
+        explain_rows = cur.fetchall()
+        explain_output = "\n".join([row[0] for row in explain_rows])
+        
+        print(f"\nPostgreSQL EXPLAIN plan:\n{explain_output}\n")
+        
+        postgres_order = parse_join_order_from_postgres(explain_output)
+        postgres_cost = get_cost_from_postgres_explain(explain_output)
+        postgres_tree = parse_postgres_join_tree(explain_output, relations_map)
+        
+        print("Executing PostgreSQL with its optimized plan (3 runs for average)...")
+        times = []
+        for _ in range(3):
+            cur.execute("DISCARD PLANS;")
+            start_time = time.time()
+            cur.execute(query)
+            cur.fetchall()
+            times.append(time.time() - start_time)
+        duration_postgres = sum(times) / len(times)
+    
+    print(f"\n--- Final Results ({num_tables} Tables) ---")
+    cost_str = f"{postgres_cost:.2f}" if postgres_cost >= 0 else "Unknown"
+    print(f"PostgreSQL Default | Time: {duration_postgres * 1000:.2f} ms | EXPLAIN Cost: {cost_str:<15} | Order: {postgres_order}")
+    
+    return duration_postgres, postgres_cost
+
+
+def run_qaoa_benchmark_only(postgres_conn, num_tables, relations_map, relations, join_conditions, query_parts):
+    """
+    Run only QAOA benchmark.
+    """
+    from run_join_optimization import (
+        get_join_costs_postgres, 
+        get_cost_from_postgres_explain,
+        calculate_tree_cost,
+        build_from_clause_forced,
+        QUBO_Split_Optimization_func,
+        SolverType,
+        QUBO_formulation
+    )
+    import time
+    import sys
+    from io import StringIO
+    
+    print(f"\n" + "="*50 + f"\n### STARTING {num_tables}-TABLE BENCHMARK (QAOA Only) ###\n" + "="*50 + "\n")
+    
+    query = f"{query_parts['select']} {query_parts['from']}"
+    if 'where' in query_parts: query += f" {query_parts['where']}"
+    query += f" {query_parts['group_by']} {query_parts['order_by']} {query_parts['limit']};"
+
+    print("--- Running QUBO Benchmark (QAOA) ---")
+    
+    # Calculate costs using PostgreSQL EXPLAIN for QAOA optimization
+    print("Calculating join costs using PostgreSQL EXPLAIN estimates...")
+    costs_map, weights = get_join_costs_postgres(postgres_conn, relations_map, relations, join_conditions, query_parts)
+    
+    # Use actual PostgreSQL EXPLAIN costs as weights for fair comparison
+    print(f"Using PostgreSQL EXPLAIN costs as weights for QAOA optimization ({len(weights)} weights)")
+    print(f"  Weight range: {min(weights):,} to {max(weights):,}")
+    
+    # Time the QAOA optimization itself
+    print("Running QAOA optimization...")
+    qaoa_start_time = time.time()
+    
+    original_stdout, sys.stdout = sys.stdout, StringIO()
+    try:
+        optimizer = QUBO_Split_Optimization_func(f"join_log_{num_tables}")
+        qubo_tree, _, error_msg = optimizer.finding_opt_jo(relations, weights, SolverType.QAOA)
+    except Exception as e:
+        qubo_tree, error_msg = None, str(e)
+        import traceback
+        print(f"QAOA optimization exception: {e}")
+        traceback.print_exc()
+    finally:
+        sys.stdout = original_stdout
+    
+    qaoa_optimization_time = time.time() - qaoa_start_time
+    print(f"QAOA optimization completed in {qaoa_optimization_time * 1000:.2f} ms")
+    
+    duration_qubo, qubo_cost, qubo_order_str = -1, -1, "No valid tree"
+    
+    if qubo_tree and not error_msg:
+        qubo_order_str = str(qubo_tree)
+        
+        # Calculate QAOA cost using PostgreSQL's cost model for comparison
+        try:
+            tree_cost = calculate_tree_cost(qubo_tree, costs_map, join_conditions)
+            print(f"QAOA tree: {qubo_tree}")
+            print(f"QAOA tree cost (PostgreSQL EXPLAIN model): {tree_cost}")
+        except Exception as e:
+            print(f"Error calculating tree cost: {e}")
+            tree_cost = 0
+        
+        # Build forced query with nested parentheses to enforce join order
+        try:
+            forced_from, _ = build_from_clause_forced(qubo_tree, relations_map, join_conditions, reverse_qaoa=True)
+            
+            forced_query = f"{query_parts['select']} FROM {forced_from}"
+            if 'where' in query_parts: forced_query += f" {query_parts['where']}"
+            forced_query += f" {query_parts['group_by']} {query_parts['order_by']} {query_parts['limit']};"
+            
+            print(f"\nForced QAOA query:\n{forced_query}")
+            
+            with postgres_conn.cursor() as cur:
+                cur.execute("SET join_collapse_limit = 1;")
+                cur.execute("SET from_collapse_limit = 1;")
+                cur.execute("SET geqo = off;")
+                
+                cur.execute(f"EXPLAIN ANALYZE {forced_query}")
+                explain_rows = cur.fetchall()
+                explain_output = "\n".join([row[0] for row in explain_rows])
+                
+                print(f"\nQAOA EXPLAIN plan:\n{explain_output}\n")
+                
+                plan_cost = get_cost_from_postgres_explain(explain_output)
+                qubo_cost = plan_cost if plan_cost > 0 else tree_cost
+                
+                print(f"\n  Note: QAOA optimized using PostgreSQL EXPLAIN cost estimates as weights.")
+                print(f"        Costs shown are PostgreSQL's actual EXPLAIN estimates for full plans.")
+                print(f"        Both optimizers use the same cost model for fair comparison.")
+                
+                print(f"\nExecuting forced QAOA join order (3 runs for average)...")
+                query_times = []
+                for _ in range(3):
+                    cur.execute("DISCARD PLANS;")
+                    start_time = time.time()
+                    cur.execute(forced_query)
+                    cur.fetchall()
+                    query_times.append(time.time() - start_time)
+                query_execution_time = sum(query_times) / len(query_times)
+                
+                duration_qubo = qaoa_optimization_time + query_execution_time
+                print(f"Query execution time: {query_execution_time * 1000:.2f} ms")
+                print(f"Total time (QAOA + execution): {duration_qubo * 1000:.2f} ms")
+                
+                cur.execute("SET join_collapse_limit = DEFAULT;")
+                cur.execute("SET from_collapse_limit = DEFAULT;")
+                cur.execute("SET geqo = DEFAULT;")
+                
+        except Exception as e:
+            print(f"Error executing forced QUBO query: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                with postgres_conn.cursor() as cur:
+                    cur.execute("SET join_collapse_limit = DEFAULT;")
+                    cur.execute("SET from_collapse_limit = DEFAULT;")
+                    cur.execute("SET geqo = DEFAULT;")
+            except:
+                pass
+            duration_qubo = -1
+            qubo_cost = tree_cost if tree_cost > 0 else -1
+    else:
+        print(f"QUBO optimization failed: {error_msg}")
+    
+    print(f"\n--- Final Results ({num_tables} Tables) ---")
+    if duration_qubo >= 0:
+        cost_str = f"{qubo_cost:.2f}" if qubo_cost >= 0 else "Unknown"
+        print(f"QUBO QAOA          | Time: {duration_qubo * 1000:.2f} ms | EXPLAIN Cost: {cost_str:<15} | Order: {qubo_order_str}")
+    else:
+        print(f"QUBO QAOA          | Execution Failed")
+    
+    return duration_qubo, qubo_cost
+
+
 def run_benchmark_with_weights_of_one(postgres_conn, num_tables, relations_map, relations, join_conditions, query_parts):
     """
-    Run benchmark using PostgreSQL EXPLAIN estimates for cost comparison,
-    but pass weights of 1 to QAOA optimizer (per teammate's instruction).
+    Run benchmark using PostgreSQL EXPLAIN estimates for cost comparison.
+    Uses actual PostgreSQL EXPLAIN costs as weights for QAOA optimizer for fair comparison.
+    Runs both PostgreSQL and QAOA benchmarks.
     """
     from run_join_optimization import (
         get_join_costs_postgres, 
@@ -225,13 +414,14 @@ def run_benchmark_with_weights_of_one(postgres_conn, num_tables, relations_map, 
         calculate_tree_cost,
         build_from_clause_forced,
         QUBO_Split_Optimization_func,
-        SolverType
+        SolverType,
+        QUBO_formulation
     )
     import time
     import sys
     from io import StringIO
     
-    print(f"\n" + "="*50 + f"\n### STARTING {num_tables}-TABLE BENCHMARK ###\n" + "="*50 + "\n")
+    print(f"\n" + "="*50 + f"\n### STARTING {num_tables}-TABLE BENCHMARK (Both) ###\n" + "="*50 + "\n")
     
     query = f"{query_parts['select']} {query_parts['from']}"
     if 'where' in query_parts: query += f" {query_parts['where']}"
@@ -267,18 +457,13 @@ def run_benchmark_with_weights_of_one(postgres_conn, num_tables, relations_map, 
     # 2. QUBO Benchmark with QAOA
     print("\n--- Running QUBO Benchmark (QAOA) ---")
     
-    # Calculate costs using PostgreSQL EXPLAIN for comparison
+    # Calculate costs using PostgreSQL EXPLAIN for QAOA optimization
     print("Calculating join costs using PostgreSQL EXPLAIN estimates...")
-    costs_map, _ = get_join_costs_postgres(postgres_conn, relations_map, relations, join_conditions, query_parts)
+    costs_map, weights = get_join_costs_postgres(postgres_conn, relations_map, relations, join_conditions, query_parts)
     
-    # Use weights of 1 for QAOA optimization (per teammate's instruction)
-    from run_join_optimization import QUBO_formulation
-    sublists = QUBO_formulation.relation_sublists(relations)
-    # Count only sublists with 2+ relations (valid joins)
-    valid_sublists = [c for c in sublists if len(c) >= 2]
-    weights = [1] * len(valid_sublists)
-    
-    print(f"Using weights of 1 for QAOA optimization ({len(weights)} weights for {len(valid_sublists)} join combinations)")
+    # Use actual PostgreSQL EXPLAIN costs as weights for fair comparison
+    print(f"Using PostgreSQL EXPLAIN costs as weights for QAOA optimization ({len(weights)} weights)")
+    print(f"  Weight range: {min(weights):,} to {max(weights):,}")
     
     # Time the QAOA optimization itself
     print("Running QAOA optimization...")
@@ -348,8 +533,9 @@ def run_benchmark_with_weights_of_one(postgres_conn, num_tables, relations_map, 
                     penalty = ((plan_cost - postgres_cost) / postgres_cost) * 100
                     print(f"  ✗ PostgreSQL prefers its own plan ({penalty:.1f}% lower cost)")
                 
-                print(f"\n  Note: QAOA optimized using weights of 1.")
+                print(f"\n  Note: QAOA optimized using PostgreSQL EXPLAIN cost estimates as weights.")
                 print(f"        Costs shown are PostgreSQL's actual EXPLAIN estimates for full plans.")
+                print(f"        Both optimizers use the same cost model for fair comparison.")
                 
                 print(f"\nExecuting forced QAOA join order (3 runs for average)...")
                 query_times = []
@@ -397,6 +583,18 @@ def run_benchmark_with_weights_of_one(postgres_conn, num_tables, relations_map, 
     return duration_postgres, postgres_cost, duration_qubo, qubo_cost
 
 
+def display_benchmark_submenu():
+    """Display benchmark submenu options"""
+    print("\n" + "="*60)
+    print("  Benchmark Options")
+    print("="*60)
+    print("  1. Run QAOA only")
+    print("  2. Run PostgreSQL only")
+    print("  3. Run both (QAOA + PostgreSQL)")
+    print("  4. Back to main menu")
+    print("="*60)
+
+
 def run_benchmark_menu(session: CLISession) -> bool:
     """Run benchmark with current query (always uses PostgreSQL EXPLAIN estimates)"""
     if not session.conn:
@@ -421,42 +619,87 @@ def run_benchmark_menu(session: CLISession) -> bool:
         if response != 'y':
             return False
     
-    try:
-        # Extract data for benchmark
-        relations_map = parsed_query['relations_map']
-        relations_list = parsed_query['relations']
-        join_conditions = parsed_query['join_conditions']
-        query_parts = parsed_query['query_parts']
+    # Display benchmark submenu
+    while True:
+        display_benchmark_submenu()
+        choice = input("\nEnter your choice (1-4): ").strip()
         
-        # Ensure all required query_parts keys exist
-        required_keys = ['select', 'from', 'where', 'group_by', 'order_by', 'limit']
-        for key in required_keys:
-            if key not in query_parts:
-                query_parts[key] = ''
+        if choice == '4':
+            return True  # Back to main menu
         
-        # Run benchmark with weights of 1 for QAOA
-        print(f"\n{'='*60}")
-        print(f"Running benchmark for {num_tables}-table join...")
-        print(f"Using PostgreSQL EXPLAIN estimates for cost comparison")
-        print(f"Using weights of 1 for QAOA optimization")
-        print(f"{'='*60}\n")
-        
-        run_benchmark_with_weights_of_one(
-            postgres_conn=session.conn,
-            num_tables=num_tables,
-            relations_map=relations_map,
-            relations=relations_list,
-            join_conditions=join_conditions,
-            query_parts=query_parts
-        )
-        
-        return True
-        
-    except Exception as e:
-        print(f"✗ Error running benchmark: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        try:
+            # Extract data for benchmark
+            relations_map = parsed_query['relations_map']
+            relations_list = parsed_query['relations']
+            join_conditions = parsed_query['join_conditions']
+            query_parts = parsed_query['query_parts']
+            
+            # Ensure all required query_parts keys exist
+            required_keys = ['select', 'from', 'where', 'group_by', 'order_by', 'limit']
+            for key in required_keys:
+                if key not in query_parts:
+                    query_parts[key] = ''
+            
+            if choice == '1':
+                # Run QAOA only
+                print(f"\n{'='*60}")
+                print(f"Running QAOA benchmark for {num_tables}-table join...")
+                print(f"Using PostgreSQL EXPLAIN estimates for cost comparison")
+                print(f"Using PostgreSQL EXPLAIN costs as weights for QAOA optimization")
+                print(f"{'='*60}\n")
+                
+                run_qaoa_benchmark_only(
+                    postgres_conn=session.conn,
+                    num_tables=num_tables,
+                    relations_map=relations_map,
+                    relations=relations_list,
+                    join_conditions=join_conditions,
+                    query_parts=query_parts
+                )
+                return True
+                
+            elif choice == '2':
+                # Run PostgreSQL only
+                print(f"\n{'='*60}")
+                print(f"Running PostgreSQL benchmark for {num_tables}-table join...")
+                print(f"{'='*60}\n")
+                
+                run_postgres_benchmark_only(
+                    postgres_conn=session.conn,
+                    num_tables=num_tables,
+                    relations_map=relations_map,
+                    relations=relations_list,
+                    join_conditions=join_conditions,
+                    query_parts=query_parts
+                )
+                return True
+                
+            elif choice == '3':
+                # Run both
+                print(f"\n{'='*60}")
+                print(f"Running benchmark for {num_tables}-table join...")
+                print(f"Using PostgreSQL EXPLAIN estimates for cost comparison")
+                print(f"Using PostgreSQL EXPLAIN costs as weights for QAOA optimization")
+                print(f"{'='*60}\n")
+                
+                run_benchmark_with_weights_of_one(
+                    postgres_conn=session.conn,
+                    num_tables=num_tables,
+                    relations_map=relations_map,
+                    relations=relations_list,
+                    join_conditions=join_conditions,
+                    query_parts=query_parts
+                )
+                return True
+            else:
+                print("✗ Invalid choice. Please enter 1-4.")
+                continue
+                
+        except Exception as e:
+            print(f"✗ Error running benchmark: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
 
 def view_connection_menu(session: CLISession):
