@@ -512,10 +512,10 @@ def get_join_costs_postgres(conn, relations_map, relations, join_conditions, que
                         continue
                 
                 # --- FIX (This is the fix from the *previous* turn) ---
-                # MODIFIED: Only add the WHERE clause if all its referenced tables are in the current combo
+                # MODIFIED: Only add the WHERE clause if it exists and all its referenced tables are in the current combo
                 combo_set = set(combo)
-                if where_aliases.issubset(combo_set):
-                    test_query += f" {query_parts['where']}"
+                if where_clause and where_aliases.issubset(combo_set):
+                    test_query += f" {where_clause}"
                 # --- FIX END ---
                 
                 # Use EXPLAIN to get cost estimate
@@ -1017,6 +1017,7 @@ if __name__ == "__main__":
     parser.add_argument('--weights', type=str, default='postgres', choices=['cardinality', 'random', 'postgres'], 
                         help='Weight generation method: "postgres" (PostgreSQL EXPLAIN estimates, default), "cardinality" (simple model), or "random" (1-100)')
     parser.add_argument('--scale', type=float, default=1.0, help='Database scale factor (default: 1.0 = 15k customers, 150k orders, 600k lineitems)')
+    parser.add_argument('--skip-db-setup', action='store_true', help='Skip database setup and use existing database (useful for comparing with CLI)')
     parser.add_argument('--host', type=str, default='localhost', help='PostgreSQL host (default: localhost)')
     parser.add_argument('--port', type=int, default=5432, help='PostgreSQL port (default: 5432)')
     parser.add_argument('--user', type=str, default='postgres', help='PostgreSQL user (default: postgres)')
@@ -1027,6 +1028,7 @@ if __name__ == "__main__":
     tables_filter = args.tables
     weight_method = args.weights
     scale_factor = args.scale
+    skip_db_setup = args.skip_db_setup
 
     # Connect to PostgreSQL
     try:
@@ -1058,8 +1060,13 @@ if __name__ == "__main__":
             
             # Use different seed AND scenario for each iteration
             # This creates fundamentally different optimization problems
-            run_seed = 42 + i if num_runs > 1 else None
-            setup_database(postgres_conn, scale_factor=scale_factor, seed=run_seed, scenario=scenario)
+            # Use fixed seed (42) for reproducible results, or None for random
+            run_seed = 42 + i if num_runs > 1 else 42  # Changed: always use seed 42 for consistency
+            
+            if skip_db_setup:
+                print(f"\n--- Skipping database setup, using existing database ---\n")
+            else:
+                setup_database(postgres_conn, scale_factor=scale_factor, seed=run_seed, scenario=scenario)
 
             # --- 3-Table Benchmark ---
             if tables_filter == 0 or tables_filter == 3:
