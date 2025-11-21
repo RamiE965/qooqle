@@ -38,7 +38,7 @@ try:
     from qiskit.circuit.library import QAOAAnsatz
     
     QISKIT_AVAILABLE = True
-    api_token = "xx_l-W4A0e0ixmnM5jPCzh_v5b_XIwkcTPP_GxM8u2Y-"
+    api_token = "6Y03Qhi5nn4-Spu2wKKLw8vmUzmxyUSbXVKIDHhIbL4-"
     QiskitRuntimeService.save_account(channel="ibm_quantum_platform", token=api_token, overwrite=True)
     print("Qiskit packages available - QAOA solver enabled")
 
@@ -270,14 +270,14 @@ class Solvers_qiskit:
             print("[Quantum] Step 3: Connecting to IBM Quantum service...")
             
             service = QiskitRuntimeService(
-                instance="crn:v1:bluemix:public:quantum-computing:us-east:a/eb294d4f5d2b4db5a7ba972891e4b119:6d876c85-9d2c-4fa9-bed1-c7e241ac10a2::"
+                instance="crn:v1:bluemix:public:quantum-computing:us-east:a/23ff1a916b374be88de046d38e205f94:27dfaf4a-1754-47e8-92a5-3fc93f6a4b33::"
             )
             # ------------------------------------------
 
             print("[Quantum] ✓ Connected successfully to new instance")
 
             # 4. Select backend
-            backend_name = "ibm_marrakesh"
+            backend_name = "ibm_torino"
             print(f"[Quantum] Step 4: Selecting backend '{backend_name}'...")
             backend = service.backend(backend_name)
             status = backend.status()
