@@ -189,7 +189,3 @@ This disables PostgreSQL's internal reordering and enforces the computed plan.
 - Rami Elsayed
 
 ---
-
-## License
-
-MIT (or institution-approved license)
