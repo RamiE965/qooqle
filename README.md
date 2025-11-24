@@ -1,7 +1,7 @@
 # Qooqle
 
-Qooqle is a research project for UW–Madison CS 620 Capstone, developed under mentorship from Google.  
-It explores whether quantum-inspired optimization methods—specifically QAOA (Quantum Approximate Optimization Algorithm)—can improve join order selection in relational database query planning.
+Qooqle is a research project for UW-Madison CS 620 Capstone, developed under mentorship from Google.  
+It explores whether quantum-inspired optimization methods, specifically QAOA (Quantum Approximate Optimization Algorithm), can improve join order selection in relational database query planning.
 
 The repository includes a full pipeline for benchmarking quantum-based join ordering against PostgreSQL's optimizer.
 
@@ -97,7 +97,7 @@ Join order search is encoded as a QUBO (Quadratic Unconstrained Binary Optimizat
 - QAOA via Qiskit
 - Exact eigensolver
 - Simulated annealing (Neal)
-- Hybrid classical–quantum techniques
+- Hybrid classical-quantum techniques
 
 ---
 
@@ -189,3 +189,7 @@ This disables PostgreSQL's internal reordering and enforces the computed plan.
 - Rami Elsayed
 
 ---
+
+## License
+
+MIT (or institution-approved license)
