@@ -1,23 +1,17 @@
 # Qooqle
 
-Qooqle is a research project for UW-Madison CS 620 Capstone, developed under mentorship from Google.  
-It explores whether quantum-inspired optimization methods, specifically QAOA (Quantum Approximate Optimization Algorithm), can improve join order selection in relational database query planning.
-
-The repository includes a full pipeline for benchmarking quantum-based join ordering against PostgreSQL's optimizer.
+Qooqle is a research project for UW-Madison CS 620 Capstone, with the mentorship from Google.  
+It explores whether quantum optimization methods, such as QAOA (Quantum Approximate Optimization Algorithm), can improve join order selection.
 
 ---
 
 ## Project Overview
 
-Qooqle implements an end-to-end join-order optimization system:
-
 1. Synthetic benchmark database generator for PostgreSQL  
-2. QUBO formulation of the join-order search problem  
+2. QUBO formulation of the join order search problem  
 3. QAOA-based and classical solvers for join optimization  
-4. Benchmarking against PostgreSQL using EXPLAIN and actual runtimes  
-5. Interactive CLI for running experiments and visualizing results  
-
-The project evaluates whether quantum-inspired techniques can outperform a sophisticated classical optimizer by exploring join order search spaces efficiently.
+4. Benchmarking against PostgreSQL 
+5. CLI for running experiments and visualizing results  
 
 ---
 
@@ -90,7 +84,7 @@ Join order search is encoded as a QUBO (Quadratic Unconstrained Binary Optimizat
 - Each possible join subset is represented as a binary variable.
 - Constraints penalize incompatible subsets.
 - The objective reflects total join plan cost.
-- Supported formulations include basic QUBO, reduced universes, and split-based decompositions.
+- Supported formulations include basic QUBO, reduced universes, and split based decompositions.
 
 ### Solvers Implemented
 
