@@ -11,16 +11,15 @@ import warnings
 from scipy.sparse import SparseEfficiencyWarning
 from enum import Enum, auto
 
-# Suppress scipy sparse matrix efficiency warnings
 warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
 
-# Qiskit (Quantum & Classical Optimization) - Updated for your specific environment
+# Qiskit (Quantum & Classical Optimization) 
 try:
     from qiskit_optimization import QuadraticProgram
     from qiskit_optimization.algorithms import MinimumEigenOptimizer
-    from qiskit_algorithms import NumPyMinimumEigensolver, QAOA
+    from qiskit_algorithms import QAOA
     from qiskit_algorithms.optimizers import COBYLA
-    from qiskit.primitives import StatevectorSampler  # Use what's actually available
+    from qiskit.primitives import StatevectorSampler
     
     QISKIT_AVAILABLE = True
     print("Qiskit packages available - QAOA solver enabled")
@@ -29,7 +28,7 @@ except ImportError as e:
     QISKIT_AVAILABLE = False
     print(f"Qiskit import failed: {e}")
 
-# Classical Optimization / Modeling (for compatibility)
+# Classical Optimization / Modeling 
 try:
     import dimod
     from dimod import BinaryQuadraticModel
