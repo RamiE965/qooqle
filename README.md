@@ -20,6 +20,10 @@ The optimizer compares its found plans against the native PostgreSQL query plann
 ├── docker-compose.yml          # PostgreSQL environment
 └── README.md                   # Project documentation
 ```
+## Core Files
+- `SSS_QUBO.py`: This contains the core QUBO logic. It maps SQL subsets into binary variables and builds the incompatibility constraints. A large portion of this file is adapted from the researcher code of **Nayak et al**.
+- `run_join_optimization.py`: Orchestrates the benchmark. It gathers cost statistics from Postgres, sends them to SSS_QUBO, forces the resulting join tree in Postgres using SET join_collapse_limit = 1, and measures performance.
+- `cli.py`: An interactive shell allowing users to write custom SQL queries and run them through the quantum optimization workflow.
 
 ---
 
@@ -173,6 +177,14 @@ Limitations
 - Learned cost models integrated with QUBO formulation
 
 ---
+## Acknowledgements & Attribution
+This project builds directly upon the research of Nayak et al. regarding quantum approaches to database query optimization. Specifically, the QUBO formulations for bushy join trees and the split optimization strategies implemented in SSS_QUBO.py are adapted from their work.
+We gratefully acknowledge their contributions to the field. If you utilize the optimization logic in this repository for academic or research purposes, please cite the original paper:
+
+> Nayak, N., Rehfeld, J., Winker, T., Warnke, B., Çalikyilmaz, U., & Groppe, S. (2023). Constructing Optimal Bushy Join Trees by Solving QUBO Problems on Quantum Hardware and Simulators. Proceedings of the International Workshop on Big Data in Emergent Distributed Environments (BiDEDE '23).
+
+---
+
 
 ## Team
 - Abdelrahman Mohammad
